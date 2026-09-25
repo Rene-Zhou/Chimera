@@ -11,8 +11,14 @@ let package = Package(
         .executable(name: "chimera", targets: ["ChimeraApp"]),
     ],
     targets: [
+        // Vendored chmlib 0.40a (LGPL-2.1, 见 Sources/CChmlib/COPYING.LGPL
+        // 与 docs/THIRD_PARTY_NOTICES.md)
+        .target(
+            name: "CChmlib"
+        ),
         .target(
             name: "ChimeraCore",
+            dependencies: ["CChmlib"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .executableTarget(
@@ -22,7 +28,7 @@ let package = Package(
         ),
         .testTarget(
             name: "ChimeraCoreTests",
-            dependencies: ["ChimeraCore"],
+            dependencies: ["ChimeraCore", "CChmlib"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
     ]
