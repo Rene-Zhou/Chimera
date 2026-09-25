@@ -1,0 +1,79 @@
+import Testing
+import Foundation
+@testable import ChimeraCore
+
+/// CHMContainer API 契约测试(基准文件快照数据)
+private let benchmarkPath =
+    NSString(string: "~/Downloads/5R不全书（全扩展）2026.9.13.chm").expandingTildeInPath
+
+private func makeContainer() throws -> CHMContainer {
+    try #require(FileManager.default.fileExists(atPath: benchmarkPath), "基准文件缺失")
+    return try CHMContainer(path: benchmarkPath)
+}
+
+@Test func containerRejectsMissingFile() {
+    #expect(throws: CHMError.fileNotFound("/no/such/file.chm")) {
+        _ = try CHMContainer(path: "/no/such/file.chm")
+    }
+}
+
+@Test func containerRejectsNonCHMFile() throws {
+    let notCHM = NSTemporaryDirectory() + "chimera-not-a-chm.bin"
+    try Data([0x00, 0x01, 0x02, 0x03]).write(to: URL(fileURLWithPath: notCHM))
+    defer { try? FileManager.default.removeItem(atPath: notCHM) }
+    #expect(throws: CHMError.self) {
+        _ = try CHMContainer(path: notCHM)
+    }
+}
+
+@Test func containerEnumeratesBenchmarkEntries() throws {
+    let c = try makeContainer()
+    let entries = try c.allEntries()
+    #expect(entries.count > 100, "基准文件条目数应远超 100,实际 \(entries.count)")
+
+    let paths = Set(entries.map(\.path))
+    // 目录探查(CLI list)确认的基准文件真实关键内部文件
+    #expect(paths.contains("/$FIftiMain"), "应含内嵌全文检索库")
+    #expect(paths.contains("/5R不全书（全扩展）2026.9.13.hhc"), "应含目录文件")
+    #expect(paths.contains("/5R不全书（全扩展）2026.9.13.hhk"), "应含索引文件")
+}
+
+@Test func containerResolvesEntryByPath() throws {
+    let c = try makeContainer()
+    let fifti = c.entry(at: "/$FIftiMain")
+    #expect(fifti != nil)
+    #expect(fifti?.length ?? 0 > 0)
+
+    // 大小写与首斜杠容错由调用方负责;不存在路径必须干净返回 nil
+    #expect(c.entry(at: "/definitely/not/here.htm") == nil)
+}
+
+@Test func containerReadsEntryBytes() throws {
+    let c = try makeContainer()
+
+    // .hhc 是小文件:整读,长度必须与条目元数据一致
+    let hhcPath = "/5R不全书（全扩展）2026.9.13.hhc"
+    let hhc = try c.read(hhcPath)
+    let meta = c.entry(at: hhcPath)
+    #expect(hhc.count > 0)
+    #expect(UInt64(hhc.count) == meta?.length)
+
+    // $FIftiMain 很大:按区间读前 64 字节
+    let head = try c.read("/$FIftiMain", range: 0..<64)
+    #expect(head.count == 64)
+
+    // 尾部区间读:末 16 字节
+    guard let len = c.entry(at: "/$FIftiMain")?.length else {
+        Issue.record("缺少 /$FIftiMain 元数据"); return
+    }
+    let tail = try c.read("/$FIftiMain", range: (len - 16)..<len)
+    #expect(tail.count == 16)
+}
+
+@Test func containerThrowsOnMissingEntryRead() throws {
+    try #require(FileManager.default.fileExists(atPath: benchmarkPath), "基准文件缺失")
+    let c = try CHMContainer(path: benchmarkPath)
+    #expect(throws: CHMError.entryNotFound("/ghost.htm")) {
+        _ = try c.read("/ghost.htm")
+    }
+}
