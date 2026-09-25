@@ -34,6 +34,13 @@ final class CHMSchemeHandler: NSObject, WKURLSchemeHandler {
                 data = try container.read(entryPath)   // LZX 惰性解压
                 mime = CHMMimeType.forPath(entryPath)
             } else {
+                // 缺失条目:页面请求给 404 提示页;非页面请求(图片/CSS/JS 等)
+                // 直接报错,由 WebView 按 broken image 处理,不把 HTML 当图片解码
+                guard CHMMimeType.forPath(entryPath) == "text/html" else {
+                    task.didFailWithError(NSError(domain: NSURLErrorDomain,
+                                                  code: NSURLErrorFileDoesNotExist))
+                    return
+                }
                 data = Data("""
                 <html><body style="font-family:-apple-system;padding:2em;color:#666">
                 <h3>404</h3><p>CHM 内未找到条目:<code>\(entryPath)</code></p>
