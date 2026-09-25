@@ -31,6 +31,21 @@ final class AppModel: ObservableObject {
         let url: URL
         let container: CHMContainer
         let homePath: String   // 如 "/玩家手册2024.htm"
+        let toc: [CHMTocItem]
+        let indexEntries: [CHMIndexEntry]
+    }
+
+    /// 侧栏/页内触发的导航请求。
+    struct NavigationRequest: Equatable {
+        let id = UUID()
+        let path: String
+    }
+
+    @Published var navigationRequest: NavigationRequest?
+
+    func navigate(to local: String) {
+        guard !local.isEmpty else { return }
+        navigationRequest = NavigationRequest(path: local)
     }
 
     @Published var document: Document?
@@ -64,7 +79,24 @@ final class AppModel: ObservableObject {
                 throw CHMError.invalidFormat("缺少默认页(#SYSTEM code 2)")
             }
             let homePath = topic.hasPrefix("/") ? topic : "/" + topic
-            document = Document(url: url, container: container, homePath: homePath)
+
+            var toc: [CHMTocItem] = []
+            var indexEntries: [CHMIndexEntry] = []
+            let allEntries = try container.allEntries()
+            if let hhc = allEntries.first(where: { $0.path.hasSuffix(".hhc") })?.path {
+                let text = CHMTextDecoder(lcid: info?.lcid).decode(try container.read(hhc))
+                toc = CHMSitemapParser.parseTOC(text)
+            }
+            if let hhk = allEntries.first(where: { $0.path.hasSuffix(".hhk") })?.path {
+                let text = CHMTextDecoder(lcid: info?.lcid).decode(try container.read(hhk))
+                indexEntries = CHMSitemapParser.parseIndex(text)
+            }
+            if ProcessInfo.processInfo.environment["CHIMERA_SMOKE"] == "1" {
+                print("OPEN toc=\(toc.count) index=\(indexEntries.count)")
+            }
+
+            document = Document(url: url, container: container, homePath: homePath,
+                                toc: toc, indexEntries: indexEntries)
             lastError = nil
         } catch {
             document = nil
@@ -99,7 +131,10 @@ struct ReaderView: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        Group {
+        NavigationSplitView {
+            SidebarView(model: model)
+                .navigationSplitViewColumnWidth(min: 180, ideal: 240, max: 460)
+        } detail: {
             if let doc = model.document {
                 WebView(document: doc, model: model).id(doc.id)
             } else {
@@ -117,6 +152,106 @@ struct ReaderView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+        }
+    }
+}
+
+// MARK: - 侧栏
+
+struct SidebarView: View {
+    @ObservedObject var model: AppModel
+    // CLT 环境无 SwiftUIMacros 插件(@State 宏不可用),
+    // 本地 UI 状态改由 ObservableObject 持有(@StateObject 已验证可用,见 DEV_ENV.md)
+    @StateObject private var state = SidebarState()
+
+    enum SidebarTab: Hashable { case toc, index }
+
+    final class SidebarState: ObservableObject {
+        @Published var tab = SidebarTab.toc
+        @Published var indexQuery = ""
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("侧栏", selection: $state.tab) {
+                Text("目录").tag(SidebarTab.toc)
+                Text("索引").tag(SidebarTab.index)
+            }
+            .pickerStyle(.segmented)
+            .padding(8)
+
+            switch state.tab {
+            case .toc:
+                if let toc = model.document?.toc {
+                    let tree = toc.map(TOCTreeNode.init)
+                    List(tree, children: \.children) { node in
+                        TOCRow(item: node.item) { model.navigate(to: $0) }
+                    }
+                    .listStyle(.sidebar)
+                }
+            case .index:
+                VStack(spacing: 4) {
+                    TextField("过滤索引…", text: $state.indexQuery)
+                        .textFieldStyle(.roundedBorder)
+                        .padding([.horizontal, .top], 8)
+                    List(filteredIndex, id: \.self) { entry in
+                        Button {
+                            if let t = entry.targets.first { model.navigate(to: t) }
+                        } label: {
+                            HStack {
+                                Text(entry.keyword).lineLimit(1)
+                                Spacer()
+                                if entry.targets.count > 1 {
+                                    Text("\(entry.targets.count)").foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    if filteredIndex.isEmpty {
+                        Text("无索引项").foregroundStyle(.secondary).padding()
+                    }
+                }
+            }
+        }
+    }
+
+    private var filteredIndex: [CHMIndexEntry] {
+        let all = model.document?.indexEntries ?? []
+        guard !state.indexQuery.isEmpty else { return all }
+        return all.filter { $0.keyword.localizedCaseInsensitiveContains(state.indexQuery) }
+    }
+}
+
+/// List(children:) 需要可选子节点;包装 CHMTocItem 并提供稳定 id。
+struct TOCTreeNode: Identifiable {
+    let item: CHMTocItem
+    let children: [TOCTreeNode]?   // nil = 叶子
+
+    init(_ item: CHMTocItem) {
+        self.item = item
+        self.children = item.children.isEmpty ? nil : item.children.map(TOCTreeNode.init)
+    }
+
+    var id: String { (item.local ?? "") + "|" + item.title }
+}
+
+struct TOCRow: View {
+    let item: CHMTocItem
+    let onOpen: (String) -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: item.children.isEmpty ? "doc.text" : "book.closed")
+                .foregroundStyle(.secondary)
+                .font(.callout)
+            Text(item.title)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if let local = item.local { onOpen(local) }
         }
     }
 }
@@ -141,6 +276,18 @@ struct WebView: NSViewRepresentable {
     }
 
     func updateNSView(_ wv: WKWebView, context: Context) {
+        if let req = model.navigationRequest,
+           context.coordinator.handledRequestID != req.id {
+            context.coordinator.handledRequestID = req.id
+            let path = req.path.hasPrefix("/") ? req.path : "/" + req.path
+            var comps = URLComponents()
+            comps.scheme = "chm"
+            comps.host = "doc"
+            comps.path = path
+            if let u = comps.url {
+                wv.load(URLRequest(url: u))
+            }
+        }
         if context.coordinator.loadedDocumentID != document.id {
             load(document, into: wv, coordinator: context.coordinator)
         }
@@ -160,6 +307,7 @@ struct WebView: NSViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate {
         weak var webView: WKWebView?
         var loadedDocumentID: UUID?
+        var handledRequestID: UUID?
         private var smokeStage = 0
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

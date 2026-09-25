@@ -1,7 +1,7 @@
 import Foundation
 
 /// CHM 目录树(.hhc)节点。
-public struct CHMTocItem: Equatable, Sendable {
+public struct CHMTocItem: Equatable, Hashable, Sendable {
     /// 显示标题(Name 参数)。
     public var title: String
     /// 目标内部路径(Local 参数,首个;文件夹节点可能没有)。
@@ -20,7 +20,7 @@ public struct CHMTocItem: Equatable, Sendable {
 }
 
 /// CHM 索引(.hhk)条目。
-public struct CHMIndexEntry: Equatable, Sendable {
+public struct CHMIndexEntry: Equatable, Hashable, Sendable {
     /// 索引词条(Keyword 参数,缺省退回 Name)。
     public var keyword: String
     /// 目标内部路径(一个词条可挂多个 Local)。
