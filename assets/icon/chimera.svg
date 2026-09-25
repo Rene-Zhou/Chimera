@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <title>Chimera — The living book</title>
+  <desc>A flat, two-color icon combining a goat, a lion and a dragon with the pages of one open book. Three compact heads sit above the pages, separated by a continuous ivory curve. Warm ivory and dark plum. All artwork is editable vector geometry.</desc>
+  <defs>
+    <clipPath id="headBoundary">
+      <path d="M200 150H824V414H780C687 414 608 438 512 479C416 438 337 414 244 414H200Z"/>
+    </clipPath>
+  </defs>
+  <!-- Flat macOS tile. The space around it is transparent. -->
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="#F2ECE2"/>
+  <g transform="translate(512 512) scale(1.35) translate(-512 -465)">
+  <!-- A single continuous shape joins both pages at the spine. -->
+  <path d="M244 382C337 382 416 406 512 447C608 406 687 382 780 382V681C687 681 608 708 512 757C416 708 337 681 244 681Z" fill="#403746"/>
+  <!-- Short necks follow the page curve, with a clean gap below. -->
+  <g transform="translate(0 -52)" clip-path="url(#headBoundary)">
+  <path d="M433 548C405 518 390 480 390 452L353 423L333 437L316 426V418L275 408Q260 404 269 390L303 352L320 325L354 325C324 298 323 253 358 225C344 266 356 294 385 315L414 345L420 397C429 451 452 501 489 555L465 575Z" fill="#403746"/>
+  <!-- A single ear and one eye are enough to read the goat in profile. -->
+  <path d="M313 345L288 316L336 323Z" fill="#403746"/>
+  <path d="M306 369L334 364" stroke="#F2ECE2" stroke-width="12" stroke-linecap="round"/>
+  <!-- Dragon and right page mirror the structure, without mirrored anatomy. -->
+  <path d="M559 575L535 555C572 501 592 449 593 398L596 339L635 294L674 248L673 314L713 329L730 365L773 382Q788 388 780 402L770 408L721 408L748 422L725 436L683 433C665 481 641 519 601 548Z" fill="#403746"/>
+  <path d="M706 367L731 379L706 386Z" fill="#F2ECE2"/>
+  <!-- A compact central neck finishes just above the spine. -->
+  <path d="M448 319C429 300 448 276 468 290L480 300Q512 285 544 300L556 290C576 276 595 300 576 319L593 345L587 391L566 412L550 438C532 481 539 524 564 562L552 595H472L460 562C485 524 492 481 474 438L458 412L437 391L431 345Z" fill="#403746"/>
+  <path d="M476 337L484 370L471 397L487 419L512 434L537 419L553 397L540 370L548 337L526 327L512 332L498 327Z" fill="#F2ECE2"/>
+  <path d="M481 369L497 376M543 369L527 376" stroke="#403746" stroke-width="10" stroke-linecap="round"/>
+  <path d="M500 395H524L512 409Z" fill="#403746"/>
+  </g>
+  <!-- Three equal-length lines follow each page, with consistent spacing and generous margins. -->
+  <g stroke="#F2ECE2" stroke-width="8" stroke-linecap="round">
+    <path d="M289 468C349 474 401 490 448 514"/>
+    <path d="M289 537C349 543 401 559 448 583"/>
+    <path d="M289 606C349 612 401 628 448 652"/>
+    <path d="M576 514C623 490 675 474 735 468"/>
+    <path d="M576 583C623 559 675 543 735 537"/>
+    <path d="M576 652C623 628 675 612 735 606"/>
+  </g>
+  </g>
+</svg>
