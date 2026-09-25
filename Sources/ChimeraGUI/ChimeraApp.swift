@@ -29,7 +29,8 @@ final class AppModel: ObservableObject {
     struct Document {
         let id = UUID()
         let url: URL
-        let html: String   // m2-1:默认页 HTML(m2-2 起改走 chm:// scheme 整站渲染)
+        let container: CHMContainer
+        let homePath: String   // 如 "/玩家手册2024.htm"
     }
 
     @Published var document: Document?
@@ -62,10 +63,8 @@ final class AppModel: ObservableObject {
             guard let topic = info?.defaultTopic, !topic.isEmpty else {
                 throw CHMError.invalidFormat("缺少默认页(#SYSTEM code 2)")
             }
-            let data = try container.read(topic)
-            let declared = Self.charsetDeclared(in: data)
-            let html = CHMTextDecoder(lcid: info?.lcid, declaredCharset: declared).decode(data)
-            document = Document(url: url, html: html)
+            let homePath = topic.hasPrefix("/") ? topic : "/" + topic
+            document = Document(url: url, container: container, homePath: homePath)
             lastError = nil
         } catch {
             document = nil
@@ -102,7 +101,7 @@ struct ReaderView: View {
     var body: some View {
         Group {
             if let doc = model.document {
-                WebView(document: doc, model: model)
+                WebView(document: doc, model: model).id(doc.id)
             } else {
                 VStack(spacing: 14) {
                     Image(systemName: "book")
@@ -129,7 +128,12 @@ struct WebView: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> WKWebView {
-        let wv = WKWebView()
+        let config = WKWebViewConfiguration()
+        config.setURLSchemeHandler(
+            CHMSchemeHandler(provider: { [weak model] in model?.document?.container }),
+            forURLScheme: "chm"
+        )
+        let wv = WKWebView(frame: .zero, configuration: config)
         context.coordinator.webView = wv
         wv.navigationDelegate = context.coordinator
         load(document, into: wv, coordinator: context.coordinator)
@@ -144,19 +148,61 @@ struct WebView: NSViewRepresentable {
 
     private func load(_ doc: AppModel.Document, into wv: WKWebView, coordinator: Coordinator) {
         coordinator.loadedDocumentID = doc.id
-        wv.loadHTMLString(doc.html, baseURL: nil)
+        var comps = URLComponents()
+        comps.scheme = "chm"
+        comps.host = "doc"
+        comps.path = doc.homePath
+        if let url = comps.url {
+            wv.load(URLRequest(url: url))
+        }
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate {
         weak var webView: WKWebView?
         var loadedDocumentID: UUID?
+        private var smokeStage = 0
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            // 冒烟验收:默认页渲染完成即报 OK 并退出(GUI 手测另行)
-            if ProcessInfo.processInfo.environment["CHIMERA_SMOKE"] == "1" {
-                let body = (webView.url?.absoluteString ?? "about:blank")
-                print("SMOKE OK rendered=\(body) title=\(webView.title ?? "")")
-                exit(0)
+            // 冒烟验收(两阶段):①默认页渲染且正文非空 ②跟随页内首个链接再渲染
+            guard ProcessInfo.processInfo.environment["CHIMERA_SMOKE"] == "1" else { return }
+            smokeStage += 1
+            webView.evaluateJavaScript(
+                "document.body ? document.body.innerText.length : -1"
+            ) { result, _ in
+                let len = (result as? Int) ?? -1
+                guard len > 0 else {
+                    print("SMOKE FAIL stage\(self.smokeStage) textLen=\(len)")
+                    exit(1)
+                }
+                if self.smokeStage == 1 {
+                    webView.evaluateJavaScript(
+                        "(function(){var a=document.querySelector('a[href]'); return a ? a.href : ''})()"
+                    ) { href, _ in
+                        if let h = href as? String, let u = URL(string: h),
+                           u.scheme?.lowercased() == "chm" {
+                            print("SMOKE NAV -> \(h)")
+                            webView.load(URLRequest(url: u))
+                        } else if let nav = ProcessInfo.processInfo.environment["CHIMERA_NAV"] {
+                            var comps = URLComponents()
+                            comps.scheme = "chm"
+                            comps.host = "doc"
+                            comps.path = nav.hasPrefix("/") ? nav : "/" + nav
+                            if let u = comps.url {
+                                print("SMOKE NAV(env) -> \(nav)")
+                                webView.load(URLRequest(url: u))
+                            } else {
+                                print("SMOKE OK url=\(webView.url?.absoluteString ?? "-") textLen=\(len) nolink")
+                                exit(0)
+                            }
+                        } else {
+                            print("SMOKE OK url=\(webView.url?.absoluteString ?? "-") textLen=\(len) nolink")
+                            exit(0)
+                        }
+                    }
+                } else {
+                    print("SMOKE OK url2=\(webView.url?.absoluteString ?? "-") textLen=\(len)")
+                    exit(0)
+                }
             }
         }
 
