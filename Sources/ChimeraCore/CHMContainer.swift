@@ -25,11 +25,14 @@ public enum CHMError: Error, Equatable {
     case readFailed(String)
 }
 
-/// CHM 文件的 Swift 侧容器抽象:枚举条目、按路径解析、按需读取(LZX 解压由 chmlib 完成)。
+/// CHM 文件的 Swift 侧容器抽象:枚举条目、按路径解析、按需读取
+/// (LZX 解压由 chmlib 完成)、系统元数据(LCID/标题/默认页)。
 /// chmlib 的文件句柄非线程安全,内部以锁串行化。
 public final class CHMContainer {
     private var handle: OpaquePointer?
     private let lock = NSLock()
+    private var systemInfoCache: CHMSystemInfo?
+    private var systemInfoLoaded = false
 
     public init(path: String) throws {
         guard FileManager.default.fileExists(atPath: path) else {
@@ -45,6 +48,8 @@ public final class CHMContainer {
         if let handle { chm_close(handle) }
     }
 
+    // MARK: - 条目
+
     /// C 回调上下文:只用纯 C 可表示的横式数据,避免从 C 回调直接操作 Swift 堆对象。
     fileprivate struct EnumContext {
         var buffer: UnsafeMutablePointer<chmUnitInfo>?
@@ -53,8 +58,10 @@ public final class CHMContainer {
     }
 
     /// 枚举容器内全部条目(含系统/元数据条目,如 "/$FIftiMain")。
+    /// 路径字节按 严格UTF-8 → LCID编码 → GBK 回退链解码。
     public func allEntries() throws -> [CHMEntry] {
         guard let handle else { throw CHMError.invalidFormat("container closed") }
+        let lcid = ((try? systemInfo()) ?? nil)?.lcid
         lock.lock()
         defer { lock.unlock() }
 
@@ -87,9 +94,8 @@ public final class CHMContainer {
         if let buffer = ctx.buffer {
             for i in 0..<Int(ctx.count) {
                 let info = buffer[i]
-                let path = withUnsafeBytes(of: info.path) { bytes in
-                    String(decoding: bytes.prefix(while: { $0 != 0 }), as: UTF8.self)
-                }
+                let raw = withUnsafeBytes(of: info.path) { Array($0.prefix(while: { $0 != 0 })) }
+                let path = Self.decodePath(raw, lcid: lcid)
                 entries.append(
                     CHMEntry(path: path, length: info.length, isDirectory: path.hasSuffix("/"))
                 )
@@ -99,18 +105,25 @@ public final class CHMContainer {
     }
 
     /// 按路径解析条目;路径自动补前导 "/";不存在返回 nil。
+    /// 注:路径串会以 UTF-8 回传 chmlib —— 适用于 UTF-8 路径容器(含基准文件);
+    /// LCID 编码路径的容器请经 allEntries() 查找(已知局限,见 M2 计划)。
     public func entry(at path: String) -> CHMEntry? {
-        guard let handle else { return nil }
-        let normalized = Self.normalize(path)
         lock.lock()
         defer { lock.unlock() }
+        return entryUnlocked(at: path)
+    }
 
+    private func entryUnlocked(at path: String) -> CHMEntry? {
+        guard let handle else { return nil }
+        let normalized = Self.normalize(path)
         var ui = chmUnitInfo()
         guard chm_resolve_object(handle, normalized, &ui) == CHM_RESOLVE_SUCCESS else {
             return nil
         }
         return CHMEntry(path: normalized, length: ui.length, isDirectory: normalized.hasSuffix("/"))
     }
+
+    // MARK: - 读取
 
     /// 整读一个条目。
     public func read(_ path: String) throws -> Data {
@@ -122,8 +135,9 @@ public final class CHMContainer {
 
     /// 按字节区间读取条目(0-based,相对条目内容起点)。
     public func read(_ path: String, range: Range<UInt64>) throws -> Data {
-        guard let handle else { throw CHMError.invalidFormat("container closed") }
-        guard let entry = entry(at: path) else {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let entry = entryUnlocked(at: path) else {
             throw CHMError.entryNotFound(path)
         }
         guard range.upperBound <= entry.length else {
@@ -131,7 +145,12 @@ public final class CHMContainer {
                 "range \(range) out of bounds for \(path)(length \(entry.length))"
             )
         }
+        return try readUnlocked(entry: entry, range: range)
+    }
 
+    /// 调用方必须已持锁。
+    private func readUnlocked(entry: CHMEntry, range: Range<UInt64>) throws -> Data {
+        guard let handle else { throw CHMError.invalidFormat("container closed") }
         let total = Int(range.count)
         guard total > 0 else { return Data() }
 
@@ -140,12 +159,9 @@ public final class CHMContainer {
         )
         defer { buffer.deallocate() }
 
-        lock.lock()
-        defer { lock.unlock() }
-
         var ui = chmUnitInfo()
         guard chm_resolve_object(handle, entry.path, &ui) == CHM_RESOLVE_SUCCESS else {
-            throw CHMError.entryNotFound(path)
+            throw CHMError.entryNotFound(entry.path)
         }
 
         var filled = 0
@@ -160,11 +176,39 @@ public final class CHMContainer {
                 Int64(total - filled)
             )
             guard n > 0 else {
-                throw CHMError.readFailed("short read at \(filled)/\(total) of \(path)")
+                throw CHMError.readFailed("short read at \(filled)/\(total) of \(entry.path)")
             }
             filled += Int(n)
         }
         return Data(bytes: buffer, count: total)
+    }
+
+    // MARK: - 系统元数据
+
+    /// /#SYSTEM 解析结果(缓存);文件不含该条目时返回 nil。
+    public func systemInfo() throws -> CHMSystemInfo? {
+        lock.lock()
+        defer { lock.unlock() }
+        if systemInfoLoaded { return systemInfoCache }
+        systemInfoLoaded = true
+        if let entry = entryUnlocked(at: "/#SYSTEM"), entry.length <= 0x100000,
+           let raw = try? readUnlocked(entry: entry, range: 0..<entry.length) {
+            systemInfoCache = CHMSystemInfoParser.parse(raw)
+        }
+        return systemInfoCache
+    }
+
+    // MARK: - 路径解码
+
+    /// 内部路径字节 → 文本:严格 UTF-8 → LCID 编码 → GBK → 有损。
+    /// (基准文件为 UTF-8 路径;典型 Windows 生成文件为 LCID 编码路径)
+    static func decodePath(_ bytes: [UInt8], lcid: UInt32?) -> String {
+        if let s = String(bytes: bytes, encoding: .utf8) { return s }
+        if let lcid, let e = CHMCharset.encoding(forLCID: lcid),
+           let s = String(bytes: bytes, encoding: e) { return s }
+        if let e = CHMCharset.encoding(forIANA: "GBK"),
+           let s = String(bytes: bytes, encoding: e) { return s }
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     static func normalize(_ path: String) -> String {

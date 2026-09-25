@@ -71,8 +71,8 @@ public enum CHMCharset {
 /// 回退顺序(强 → 弱):
 /// 1. BOM(UTF-8 / UTF-16LE / UTF-16BE)
 /// 2. HTML charset 声明
-/// 3. CHM 头 LCID
-/// 4. 内容嗅探:严格 UTF-8
+/// 3. 内容嗅探:严格 UTF-8
+/// 4. CHM 头 LCID
 /// 5. GBK 兜底(中文 CHM 惯例;GB18030 超集)
 /// 6. 有损 UTF-8(替换字符)
 public struct CHMTextDecoder {
@@ -106,15 +106,16 @@ public struct CHMTextDecoder {
             return s
         }
 
-        // 3) LCID
-        if let lcid,
-           let enc = CHMCharset.encoding(forLCID: lcid),
-           let s = String(data: data, encoding: enc) {
+        // 3) 内容嗅探:严格 UTF-8(GBK 中文序列几乎不可能是合法 UTF-8;
+        //    反之 UTF-8 字节几乎总能被 GBK“成功”解出乱码,故 UTF-8 必须先于 LCID)
+        if let s = String(data: data, encoding: .utf8) {
             return s
         }
 
-        // 4) 内容嗅探:严格 UTF-8(GBK 中文序列几乎不可能是合法 UTF-8)
-        if let s = String(data: data, encoding: .utf8) {
+        // 4) LCID
+        if let lcid,
+           let enc = CHMCharset.encoding(forLCID: lcid),
+           let s = String(data: data, encoding: enc) {
             return s
         }
 

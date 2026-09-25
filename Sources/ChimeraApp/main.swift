@@ -7,8 +7,43 @@ import ChimeraCore
 
 let args = CommandLine.arguments
 
-if args.count >= 2 && args[1] == "info" {
+if args.count >= 2 && args[1] == "about" {
     print("\(ChimeraInfo.name) (\(ChimeraInfo.codename)) — CHM reader for macOS")
+} else if args.count >= 3 && args[1] == "info" {
+    do {
+        let c = try CHMContainer(path: args[2])
+        let info = try c.systemInfo()
+        let entries = try c.allEntries()
+        print("title:    \(info?.title ?? "-")")
+        print("lcid:     \(info?.lcid.map { String(format: "0x%04X", Int($0)) } ?? "-")")
+        print("default:  \(info?.defaultTopic ?? "-")")
+        print("entries:  \(entries.count)")
+    } catch {
+        print("error: \(error)")
+        exit(1)
+    }
+} else if args.count >= 3 && args[1] == "toc" {
+    do {
+        let c = try CHMContainer(path: args[2])
+        let info = try c.systemInfo()
+        guard let hhc = try c.allEntries().first(where: { $0.path.hasSuffix(".hhc") })?.path else {
+            print("no .hhc found")
+            exit(1)
+        }
+        let text = CHMTextDecoder(lcid: info?.lcid).decode(try c.read(hhc))
+        let toc = CHMSitemapParser.parseTOC(text)
+        func dump(_ items: [CHMTocItem], _ depth: Int) {
+            for it in items {
+                print(String(repeating: "  ", count: depth) + it.title
+                    + (it.local.map { "  → \($0)" } ?? ""))
+                dump(it.children, depth + 1)
+            }
+        }
+        dump(toc, 0)
+    } catch {
+        print("error: \(error)")
+        exit(1)
+    }
 } else if args.count >= 3 && args[1] == "list" {
     do {
         let container = try CHMContainer(path: args[2])
@@ -61,6 +96,6 @@ if args.count >= 2 && args[1] == "info" {
         exit(1)
     }
 } else {
-    print("usage: chimera <info | list <file.chm>>")
+    print("usage: chimera <about | info <file.chm> | toc <file.chm> | list <file.chm> | read <file.chm> <entry> | extract <file.chm> <entry> <out>>")
     exit(64)
 }
