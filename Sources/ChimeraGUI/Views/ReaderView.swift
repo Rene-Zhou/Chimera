@@ -10,14 +10,15 @@ struct ReaderView: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        VStack(spacing: 0) {
-            if !model.tabs.isEmpty {
-                TabBar(model: model)
-            }
-            NavigationSplitView {
-                SidebarView(model: model)
-                    .navigationSplitViewColumnWidth(min: 180, ideal: 240, max: 460)
-            } detail: {
+        NavigationSplitView {
+            SidebarView(model: model)
+                .navigationSplitViewColumnWidth(min: 180, ideal: 240, max: 460)
+        } detail: {
+            VStack(spacing: 0) {
+                // 标签栏只覆盖内容区(与文档等宽),不压侧栏
+                if !model.tabs.isEmpty {
+                    TabBar(model: model)
+                }
                 ZStack(alignment: .top) {
                     if model.tabs.isEmpty {
                         VStack(spacing: 14) {
@@ -152,13 +153,10 @@ struct TabBarItem: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: "book")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text(tab.title)
+            Text(tab.pageTitle)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .frame(maxWidth: 150)
+                .frame(maxWidth: 180)
             Button {
                 model.closeTab(id: tab.id)
             } label: {

@@ -144,7 +144,7 @@ final class AppModel: ObservableObject {
 
     @Published var bookmarks: [CHMBookmark] = []
     var bookmarkStore: CHMBookmarkStore?
-    private var tocTitleMap: [String: String] = [:]
+    var tocTitleMap: [String: String] = [:]
 
     // MARK: 目录树展开状态(书级,持久化)
 

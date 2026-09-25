@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import ChimeraCore
 
 // MARK: - 侧栏
@@ -18,13 +19,14 @@ struct SidebarView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("侧栏", selection: $state.tab) {
+            Picker("", selection: $state.tab) {
                 Text("目录").tag(SidebarTab.toc)
                 Text("索引").tag(SidebarTab.index)
                 Text("搜索").tag(SidebarTab.search)
                 Text("书签").tag(SidebarTab.marks)
             }
             .pickerStyle(.segmented)
+            .labelsHidden()
             .padding(8)
 
             switch state.tab {
@@ -61,7 +63,13 @@ struct SidebarView: View {
                                 .buttonStyle(.borderless).foregroundStyle(.secondary)
                             }
                             .contentShape(Rectangle())
-                            .onTapGesture { model.navigate(to: bm.path) }
+                            .onTapGesture {
+                                if NSEvent.modifierFlags.contains(.command) {
+                                    model.openInNewTab(bm.path)
+                                } else {
+                                    model.navigate(to: bm.path)
+                                }
+                            }
                         }
                     }
                 }
@@ -115,8 +123,12 @@ struct SidebarView: View {
                         }
                         List(model.searchHits, id: \.path) { hit in
                             Button {
-                                model.activeTab?.pendingHighlight = model.searchQuery
-                                model.navigate(to: hit.path)
+                                if NSEvent.modifierFlags.contains(.command) {
+                                    model.openInNewTab(hit.path)
+                                } else {
+                                    model.activeTab?.pendingHighlight = model.searchQuery
+                                    model.navigate(to: hit.path)
+                                }
                             } label: {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(hit.title).lineLimit(1)
@@ -138,7 +150,13 @@ struct SidebarView: View {
                         .padding([.horizontal, .top], 8)
                     List(filteredIndex, id: \.self) { entry in
                         Button {
-                            if let t = entry.targets.first { model.navigate(to: t) }
+                            if let t = entry.targets.first {
+                                if NSEvent.modifierFlags.contains(.command) {
+                                    model.openInNewTab(t)
+                                } else {
+                                    model.navigate(to: t)
+                                }
+                            }
                         } label: {
                             HStack {
                                 Text(entry.keyword).lineLimit(1)
@@ -188,6 +206,15 @@ struct TOCNodeView: View {
 
     private var expanded: Bool { model.tocExpanded.contains(node.id) }
 
+    /// 点击=导航,⌘+点击=新标签页打开。
+    private func open(_ local: String) {
+        if NSEvent.modifierFlags.contains(.command) {
+            model.openInNewTab(local)
+        } else {
+            model.navigate(to: local)
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 4) {
@@ -204,9 +231,6 @@ struct TOCNodeView: View {
                 } else {
                     Spacer().frame(width: 14)
                 }
-                Image(systemName: node.children == nil ? "doc.text" : "book.closed")
-                    .foregroundStyle(.secondary)
-                    .font(.callout)
                 Text(node.item.title)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -217,8 +241,7 @@ struct TOCNodeView: View {
             .contentShape(Rectangle())
             .onTapGesture {
                 if let local = node.item.local {
-                    // 点标题=导航(含既有 local 又有 children 的节点)
-                    model.navigate(to: local)
+                    open(local)
                 } else if node.children != nil {
                     // 纯文件夹节点:点标题只切换展开
                     model.toggleTOCExpanded(node.id)

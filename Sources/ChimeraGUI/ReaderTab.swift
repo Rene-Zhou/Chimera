@@ -15,12 +15,12 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
     @Published var history = CHMHistory()
     @Published var currentPath: String?
     @Published var navigationRequest: AppModel.NavigationRequest?
+    /// 标签标题:当前页的章节名(TOC 优先,页面 <title> 次之,路径兜底)
+    @Published var pageTitle = ""
     /// 搜索跳转后待高亮的检索词
     var pendingHighlight: String?
 
     private var cancellables = Set<AnyCancellable>()
-
-    var title: String { model?.document?.url.lastPathComponent ?? "CHM" }
 
     init(document: AppModel.Document, model: AppModel, loadPath: String?) {
         self.document = document
@@ -134,7 +134,11 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
         }
         switch scheme {
         case "chm":
-            if navigationAction.targetFrame == nil {
+            if navigationAction.modifierFlags.contains(.command) {
+                // ⌘+点击:在新标签页打开
+                decisionHandler(.cancel)
+                model?.openInNewTab(url.path)
+            } else if navigationAction.targetFrame == nil {
                 decisionHandler(.cancel)
                 webView.load(URLRequest(url: url))
             } else {
@@ -155,12 +159,26 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
         if let url = webView.url, url.scheme?.lowercased() == "chm" {
             currentPath = url.path
             history.push(url.path)
+            updatePageTitle()
             model?.tabDidCommitPath(url.path, bookURL: document.url)
         }
     }
 
+    /// 标签标题:TOC 章节名优先,页面 <title> 兜底,最后退到文件名。
+    private func updatePageTitle() {
+        guard let path = currentPath else { return }
+        if let t = model?.tocTitleMap[path] ?? model?.tocTitleMap[String(path.dropFirst())],
+           !t.isEmpty {
+            pageTitle = t
+            return
+        }
+        let docTitle = webView.title ?? ""
+        pageTitle = docTitle.isEmpty ? (path as NSString).lastPathComponent : docTitle
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         let smoke = ProcessInfo.processInfo.environment["CHIMERA_SMOKE"] == "1"
+        updatePageTitle()   // didCommit 时 <title> 尚未解析,此处再刷一次
         if let q = pendingHighlight {
             pendingHighlight = nil
             webView.evaluateJavaScript(Self.highlightJS(q)) { result, _ in
