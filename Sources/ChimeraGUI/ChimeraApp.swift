@@ -24,6 +24,24 @@ struct ChimeraApp: App {
                 Button("关闭标签页") { model.closeActiveTab() }
                     .keyboardShortcut("w", modifiers: .command)
                     .disabled(model.tabs.isEmpty)
+                Divider()
+                Button("放大") { model.zoom(delta: 0.1) }
+                    .keyboardShortcut("=", modifiers: .command)
+                Button("缩小") { model.zoom(delta: -0.1) }
+                    .keyboardShortcut("-", modifiers: .command)
+                Button("实际大小") { model.zoom(reset: true) }
+                    .keyboardShortcut("0", modifiers: .command)
+                Divider()
+                Button("显示设置…") { model.settingsVisible = true }
+                if !model.recents.isEmpty {
+                    Menu("最近打开") {
+                        ForEach(model.recents, id: \.self) { p in
+                            Button(URL(fileURLWithPath: p).lastPathComponent) {
+                                model.open(url: URL(fileURLWithPath: p))
+                            }
+                        }
+                    }
+                }
             }
             CommandGroup(after: .textEditing) {
                 Button("页内查找…") { model.findVisible = true }
@@ -86,6 +104,14 @@ final class AppModel: ObservableObject {
     var bookmarkStore: CHMBookmarkStore?
     private var tocTitleMap: [String: String] = [:]
 
+    // MARK: 显示设置与阅读状态
+
+    @Published var settings = CHMDisplaySettings()
+    @Published var settingsVisible = false
+    @Published var recents: [String] = []
+    let settingsStore: CHMSettingsStore
+    let readingStateStore: CHMReadingStateStore
+
     var canGoBack: Bool { activeTab?.history.canGoBack ?? false }
     var canGoForward: Bool { activeTab?.history.canGoForward ?? false }
     var isCurrentPageBookmarked: Bool {
@@ -97,6 +123,13 @@ final class AppModel: ObservableObject {
     private var smoke: Bool { ProcessInfo.processInfo.environment["CHIMERA_SMOKE"] == "1" }
 
     init() {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Chimera", isDirectory: true)
+        settingsStore = CHMSettingsStore(storageURL: dir.appendingPathComponent("Settings.json"))
+        readingStateStore = CHMReadingStateStore(
+            storageURL: dir.appendingPathComponent("ReadingState.json"))
+        settings = settingsStore.settings
+        recents = readingStateStore.recents
         if let auto = ProcessInfo.processInfo.environment["CHIMERA_AUTO_OPEN"] {
             open(url: URL(fileURLWithPath: (auto as NSString).expandingTildeInPath))
         }
@@ -149,9 +182,14 @@ final class AppModel: ObservableObject {
             bookmarks = bookmarkStore?.bookmarks ?? []
             tocTitleMap = Self.tocTitles(from: toc)
 
-            let tab = ReaderTab(document: doc, model: self, loadPath: nil)
+            // 状态记忆:恢复上次阅读位置(条目仍存在时),并登记最近打开
+            let lastPath = readingStateStore.lastPath(forBookKey: url.path)
+            let restore = lastPath.flatMap { container.entry(at: $0) != nil ? lastPath : nil }
+            let tab = ReaderTab(document: doc, model: self, loadPath: restore)
             tabs = [tab]
             activeTabID = tab.id
+            readingStateStore.recordRecent(url.path)
+            recents = readingStateStore.recents
             lastError = nil
             buildIndexIfNeeded()
         } catch {
@@ -283,6 +321,27 @@ final class AppModel: ObservableObject {
         bookmarks = bookmarkStore?.bookmarks ?? []
     }
 
+    // MARK: 显示设置 / 缩放 / 阅读状态保存
+
+    func updateSettings(font: String? = nil, size: Double? = nil) {
+        var s = settings
+        if let font { s.fontFamily = font }
+        if let size { s.fontSize = size }
+        settings = s
+        settingsStore.update(s)
+        for tab in tabs { tab.applyFont(s) }
+    }
+
+    func zoom(delta: Double = 0, reset: Bool = false) {
+        guard let tab = activeTab else { return }
+        let target = reset ? 1.0 : min(3.0, max(0.5, tab.webView.magnification + delta))
+        tab.webView.setMagnification(target, centeredAt: .zero)
+    }
+
+    fileprivate func tabDidCommitPath(_ path: String, bookURL: URL) {
+        readingStateStore.setLastPath(path, forBookKey: bookURL.path)
+    }
+
     // MARK: 冒烟状态机(统一驱动 NAV/SEARCH/FIND/HISTORY/TABS 链路)
 
     fileprivate func tabDidFinish(_ tab: ReaderTab, textLen: Int) {
@@ -324,6 +383,11 @@ final class AppModel: ObservableObject {
 
         case 2:
             guard textLen > 0 else { fail("stage2 textLen=\(textLen)") }
+            if env["CHIMERA_RESTORE"] == "1" {
+                print("REOPEN \(tab.document.url.lastPathComponent)")
+                open(url: tab.document.url)
+                return
+            }
             if env["CHIMERA_TABS"] == "1" {
                 print("TAB1 second=\(tab.currentPath ?? "-")")
                 newTab()
@@ -338,6 +402,13 @@ final class AppModel: ObservableObject {
 
         case 3:
             guard textLen > 0 else { fail("stage3 textLen=\(textLen)") }
+            if env["CHIMERA_RESTORE"] == "1" {
+                let expected = env["CHIMERA_NAV"] ?? ""
+                let exp = expected.hasPrefix("/") ? expected : "/" + expected
+                let ok = tab.currentPath == exp
+                print("RESTORE restored=\(tab.currentPath ?? "-") ok=\(ok)")
+                exit(ok ? 0 : 1)
+            }
             if env["CHIMERA_TABS"] == "1" {
                 print("TAB2 home=\(tab.currentPath ?? "-")")
                 guard let first = tabs.first, first !== tab else { fail("tabs 状态异常") }
@@ -469,6 +540,7 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
         if let url = webView.url, url.scheme?.lowercased() == "chm" {
             currentPath = url.path
             history.push(url.path)
+            model?.tabDidCommitPath(url.path, bookURL: document.url)
         }
     }
 
@@ -480,6 +552,7 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
                 if smoke { print("HIGHLIGHT count=\((result as? Int) ?? 0)") }
             }
         }
+        if let m = model { applyFont(m.settings) }
         if smoke {
             webView.evaluateJavaScript("document.body ? document.body.innerText.length : -1") { r, _ in
                 self.model?.tabDidFinish(self, textLen: (r as? Int) ?? -1)
@@ -495,6 +568,21 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
     }
 
     // MARK: 注入 JS
+
+    func applyFont(_ s: CHMDisplaySettings) {
+        webView.evaluateJavaScript(Self.fontJS(s), completionHandler: nil)
+    }
+
+    /// 用户字体注入(每次页面加载与设置变更时应用)。
+    static func fontJS(_ s: CHMDisplaySettings) -> String {
+        let fam = s.fontFamily.map { "'" + $0.replacingOccurrences(of: "'", with: "") + "', " } ?? ""
+        return """
+        (function(){var e=document.getElementById('chimera-font-style');
+        if(!e){e=document.createElement('style');e.id='chimera-font-style';document.head.appendChild(e);}
+        e.textContent='*{font-family:\(fam)-apple-system,system-ui,sans-serif !important;font-size:\(Int(s.fontSize))px !important;}';
+        return 1;})()
+        """
+    }
 
     /// 命中词高亮:文本节点包裹 <mark> 并滚动到首个命中。
     static func highlightJS(_ query: String) -> String {
@@ -634,6 +722,48 @@ struct ReaderView: View {
                 }
             }
         }
+        .sheet(isPresented: $model.settingsVisible) { SettingsPanel(model: model) }
+    }
+}
+
+/// 显示设置面板:字体/字号,即时生效并持久化。
+struct SettingsPanel: View {
+    @ObservedObject var model: AppModel
+
+    private let fonts: [(String, String?)] = [
+        ("默认(系统)", nil),
+        ("苹方 PingFang SC", "PingFang SC"),
+        ("宋体 Songti SC", "Songti SC"),
+        ("楷体 Kaiti SC", "Kaiti SC"),
+        ("仿宋 STFangsong", "STFangsong"),
+        ("黑体 STHeiti", "STHeiti"),
+    ]
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("显示设置").font(.title3)
+            Picker("字体", selection: Binding<String?>(
+                get: { model.settings.fontFamily },
+                set: { model.updateSettings(font: $0) }
+            )) {
+                ForEach(fonts, id: \.0) { name, value in
+                    Text(name).tag(value)
+                }
+            }
+            .pickerStyle(.radioGroup)
+            HStack {
+                Text("字号 \(Int(model.settings.fontSize)) px")
+                    .monospacedDigit()
+                Slider(value: Binding<Double>(
+                    get: { model.settings.fontSize },
+                    set: { model.updateSettings(size: $0) }
+                ), in: 12...24, step: 1)
+            }
+            Button("完成") { model.settingsVisible = false }
+                .keyboardShortcut(.defaultAction)
+        }
+        .padding(24)
+        .frame(width: 340)
     }
 }
 
