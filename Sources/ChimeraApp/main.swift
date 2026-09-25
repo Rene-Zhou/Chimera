@@ -50,6 +50,16 @@ if args.count >= 2 && args[1] == "info" {
         print("error: \(error)")
         exit(1)
     }
+} else if args.count >= 5 && args[1] == "extract" {
+    do {
+        let c = try CHMContainer(path: args[2])
+        let data = try c.read(args[3])
+        try data.write(to: URL(fileURLWithPath: args[4]))
+        print("wrote \(data.count) bytes to \(args[4])")
+    } catch {
+        print("error: \(error)")
+        exit(1)
+    }
 } else {
     print("usage: chimera <info | list <file.chm>>")
     exit(64)
