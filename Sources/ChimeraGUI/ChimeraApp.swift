@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import WebKit
+import Combine
 import UniformTypeIdentifiers
 import ChimeraCore
 
@@ -17,6 +18,10 @@ struct ChimeraApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("打开…") { model.openPanel() }
                     .keyboardShortcut("o", modifiers: .command)
+            }
+            CommandGroup(after: .textEditing) {
+                Button("页内查找…") { model.findVisible = true }
+                    .keyboardShortcut("f", modifiers: .command)
             }
         }
     }
@@ -58,6 +63,30 @@ final class AppModel: ObservableObject {
     @Published var searchHits: [CHMSearchHit] = []
     /// 搜索跳转后待高亮的检索词
     var pendingHighlight: String?
+
+    // MARK: 页内查找
+    struct FindAction: Equatable {
+        let id = UUID()
+        let query: String
+        let direction: Int   // 0 首次, 1 下一个, -1 上一个
+    }
+
+    @Published var findVisible = false
+    @Published var findQuery = ""
+    @Published var findStatus = ""
+    @Published var findAction: FindAction?
+
+    func startFind() {
+        let q = findQuery.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { findStatus = ""; return }
+        findAction = FindAction(query: q, direction: 0)
+    }
+
+    func triggerFind(next: Bool) {
+        let q = findQuery.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { findStatus = ""; return }
+        findAction = FindAction(query: q, direction: next ? 1 : -1)
+    }
 
     func runSearch() {
         guard let idx = searchIndex else { searchHits = []; return }
@@ -198,9 +227,10 @@ struct ReaderView: View {
             SidebarView(model: model)
                 .navigationSplitViewColumnWidth(min: 180, ideal: 240, max: 460)
         } detail: {
-            if let doc = model.document {
-                WebView(document: doc, model: model).id(doc.id)
-            } else {
+            ZStack(alignment: .top) {
+                if let doc = model.document {
+                    WebView(document: doc, model: model).id(doc.id)
+                } else {
                 VStack(spacing: 14) {
                     Image(systemName: "book")
                         .font(.system(size: 56))
@@ -214,8 +244,40 @@ struct ReaderView: View {
                         .keyboardShortcut("o", modifiers: .command)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                if model.findVisible {
+                    FindBar(model: model)
+                }
             }
         }
+    }
+}
+
+/// 页内查找覆盖条(Cmd+F 唤起)。
+struct FindBar: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("页内查找", text: $model.findQuery)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 200)
+                .onSubmit { model.triggerFind(next: true) }
+            Button { model.triggerFind(next: false) } label: { Image(systemName: "chevron.up") }
+                .buttonStyle(.borderless)
+            Button { model.triggerFind(next: true) } label: { Image(systemName: "chevron.down") }
+                .buttonStyle(.borderless)
+            Text(model.findStatus).font(.caption).foregroundStyle(.secondary).frame(width: 44)
+            Spacer()
+            Button { model.findVisible = false; model.findStatus = "" } label: {
+                Image(systemName: "xmark.circle.fill")
+            }
+            .buttonStyle(.borderless).foregroundStyle(.secondary)
+        }
+        .padding(8)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .padding(8)
     }
 }
 
@@ -422,14 +484,90 @@ struct WebView: NSViewRepresentable {
         }
     }
 
+    /// 页内查找 JS:收集全部命中(span 包裹),游标循环,当前项橙色并滚动。
+    static func findJS(_ query: String, direction: Int) -> String {
+        let q = query
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+        return """
+        (function(){
+          var q='\(q)'; if(!q) return '0/0';
+          var dir=\(direction);
+          if(dir===0 || window.__chimeraFindQ!==q || !window.__chimeraMarks){
+            if(window.__chimeraMarks){
+              window.__chimeraMarks.forEach(function(m){
+                if(m.parentNode){ var p=m.parentNode; p.replaceChild(document.createTextNode(m.textContent),m); p.normalize(); }
+              });
+            }
+            window.__chimeraFindQ=q; window.__chimeraMarks=[]; window.__chimeraIdx=-1;
+            var ql=q.toLowerCase();
+            var walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
+            var nodes=[]; while(walker.nextNode()) nodes.push(walker.currentNode);
+            nodes.forEach(function(n){
+              var t=n.nodeValue; if(!t) return;
+              var lt=t.toLowerCase(); var i=lt.indexOf(ql); if(i<0) return;
+              var frag=document.createDocumentFragment(); var pos=0;
+              while(i>=0){
+                frag.appendChild(document.createTextNode(t.slice(pos,i)));
+                var m=document.createElement('span');
+                m.style.backgroundColor='#ffe066';
+                m.textContent=t.substr(i,q.length);
+                window.__chimeraMarks.push(m);
+                frag.appendChild(m);
+                pos=i+q.length; i=lt.indexOf(ql,pos);
+              }
+              frag.appendChild(document.createTextNode(t.slice(pos)));
+              n.parentNode.replaceChild(frag,n);
+            });
+          }
+          var marks=window.__chimeraMarks||[];
+          if(!marks.length) return '0/0';
+          if(window.__chimeraIdx>=0 && marks[window.__chimeraIdx])
+            marks[window.__chimeraIdx].style.backgroundColor='#ffe066';
+          window.__chimeraIdx += (dir===0 ? (window.__chimeraIdx<0?1:0) : dir);
+          if(window.__chimeraIdx>=marks.length) window.__chimeraIdx=0;
+          if(window.__chimeraIdx<0) window.__chimeraIdx=marks.length-1;
+          var m=marks[window.__chimeraIdx];
+          m.style.backgroundColor='#ff9500';
+          m.scrollIntoView({block:'center'});
+          return (window.__chimeraIdx+1)+'/'+marks.length;
+        })()
+        """
+    }
+
     final class Coordinator: NSObject, WKNavigationDelegate {
         let model: AppModel
         weak var webView: WKWebView?
         var loadedDocumentID: UUID?
         var handledRequestID: UUID?
+        var handledFindID: UUID?
         private var smokeStage = 0
+        private var cancellables = Set<AnyCancellable>()
 
-        init(model: AppModel) { self.model = model }
+        init(model: AppModel) {
+            self.model = model
+            super.init()
+            // 页内查找经 Combine 驱动:不依赖 SwiftUI 对 representable 的差异比对
+            model.$findAction
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] act in
+                    guard let self, let act, self.handledFindID != act.id,
+                          let wv = self.webView else { return }
+                    self.handledFindID = act.id
+                    wv.evaluateJavaScript(
+                        WebView.findJS(act.query, direction: act.direction)
+                    ) { result, _ in
+                        guard let status = result as? String else { return }
+                        model.findStatus = status
+                        if ProcessInfo.processInfo.environment["CHIMERA_SMOKE"] == "1",
+                           ProcessInfo.processInfo.environment["CHIMERA_FIND"] == act.query {
+                            print("FIND q=\(act.query) status=\(status)")
+                            exit(status.hasPrefix("0/") ? 1 : 0)
+                        }
+                    }
+                }
+                .store(in: &cancellables)
+        }
 
         /// 命中词高亮 JS:文本节点包裹 <mark> 并滚动到首个命中。
         static func highlightJS(_ query: String) -> String {
@@ -487,6 +625,13 @@ struct WebView: NSViewRepresentable {
                     exit(1)
                 }
                 if self.smokeStage == 1 {
+                    // 页内查找链路:CHIMERA_FIND=关键词(结果经 updateNSView 回调打印并退出)
+                    if let fq = ProcessInfo.processInfo.environment["CHIMERA_FIND"] {
+                        self.model.findQuery = fq
+                        self.model.findVisible = true
+                        self.model.startFind()
+                        return
+                    }
                     // 搜索链路:CHIMERA_SEARCH=关键词
                     if let q = ProcessInfo.processInfo.environment["CHIMERA_SEARCH"],
                        let idx = self.model.searchIndex {
