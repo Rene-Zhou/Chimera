@@ -61,6 +61,8 @@ run FIND    CHIMERA_FIND="$FIND_Q"
 run HISTORY CHIMERA_NAV="$NAV_PATH" CHIMERA_HISTORY=1
 run TABS    CHIMERA_NAV="$NAV_PATH" CHIMERA_TABS=1
 run RESTORE CHIMERA_NAV="$NAV_PATH" CHIMERA_RESTORE=1
+# 外链回投:术语释义页内的 https 源站链接应映射到容器内 /动作.htm 而非打开浏览器
+run LINKBACK CHIMERA_NAV="术语释义.htm" CHIMERA_CLICK_HTTPS=1 CHIMERA_CLICK_EXPECT="/动作.htm"
 
 echo
 if [ "$overall" -eq 0 ]; then

@@ -29,6 +29,11 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
         let container = document.container
         let config = WKWebViewConfiguration()
         config.setURLSchemeHandler(CHMSchemeHandler(provider: { container }), forURLScheme: "chm")
+        // 离线防线:屏蔽一切 http(s) 子资源(远程图片/脚本/字体等)。
+        // 主框架导航由 decidePolicyFor 处理,这里只管子资源,与 PRD"无外部网络请求"对齐。
+        if let rules = Self.offlineRuleList() {
+            config.userContentController.add(rules)
+        }
         webView = WKWebView(frame: .zero, configuration: config)
 
         super.init()
@@ -77,12 +82,37 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
         if let p = history.goForward() { requestNav(p) }
     }
 
-    private func load(path rawPath: String) {
+    /// 编译/读取持久化的内容拦截规则(屏蔽 http/https 子资源)。
+    /// WKContentRuleListStore 的编译结果按 identifier 持久化,首次编译后
+    /// 后续 lookUp 走缓存;两次都设 2s 看门狗,失败则放行(不影响可用性)。
+    private static func offlineRuleList() -> WKContentRuleList? {
+        guard let store = WKContentRuleListStore.default() else { return nil }
+        let id = "chimera-block-external-subresources"
+        var result: WKContentRuleList?
+        var sem = DispatchSemaphore(value: 0)
+        store.lookUpContentRuleList(forIdentifier: id) { list, _ in
+            result = list
+            sem.signal()
+        }
+        guard sem.wait(timeout: .now() + 2) == .success else { return nil }
+        if let result { return result }
+        let json = #"[{"trigger":{"url-filter":"^https?://","resource-type":["image","script","style-sheet","font","media","svg-document","raw","popup","ping","fetch","websocket","other"]},"action":{"type":"block"}}]"#
+        sem = DispatchSemaphore(value: 0)
+        store.compileContentRuleList(forIdentifier: id, encodedContentRuleList: json) { list, _ in
+            result = list
+            sem.signal()
+        }
+        guard sem.wait(timeout: .now() + 2) == .success else { return nil }
+        return result
+    }
+
+    private func load(path rawPath: String, fragment: String? = nil) {
         let path = rawPath.hasPrefix("/") ? rawPath : "/" + rawPath
         var comps = URLComponents()
         comps.scheme = "chm"
         comps.host = "doc"
         comps.path = path
+        comps.fragment = fragment
         if let u = comps.url {
             webView.load(URLRequest(url: u))
         }
@@ -91,7 +121,8 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
     // MARK: WKNavigationDelegate
 
     /// 导航策略(离线/隐私):只允许 chm: 在 WebView 内加载;
-    /// http(s) 取消并转外部浏览器;ms-its 等其他 scheme 一律取消;
+    /// http(s) 优先回投为容器内同名页面(抓取站生成的 CHM 常把站内交叉引用
+    /// 写成源站绝对 URL),无法回投才转外部浏览器;其他 scheme 一律取消;
     /// target=_blank(targetFrame == nil)的 chm 链接改在当前 WebView 加载。
     func webView(_ webView: WKWebView,
                  decidePolicyFor navigationAction: WKNavigationAction,
@@ -110,8 +141,19 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
                 decisionHandler(.allow)
             }
         case "http", "https":
-            NSWorkspace.shared.open(url)
-            decisionHandler(.cancel)
+            // 仅用户真实点击链接才回投/转外部;iframe/重定向等静默取消
+            guard navigationAction.navigationType == .linkActivated else {
+                decisionHandler(.cancel)
+                return
+            }
+            if let hit = CHMPath.mapExternalToInternal(
+                url.absoluteString, filenameIndex: document.filenameIndex) {
+                decisionHandler(.cancel)
+                load(path: hit.path, fragment: hit.fragment)
+            } else {
+                NSWorkspace.shared.open(url)
+                decisionHandler(.cancel)
+            }
         default:
             decisionHandler(.cancel)
         }
