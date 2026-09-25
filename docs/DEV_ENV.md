@@ -4,7 +4,7 @@
 
 - macOS(Apple Silicon),**仅安装 Command Line Tools(CLT)**,无完整 Xcode
 - CLT 内置 Swift 6.4 + SDK MacOSX27.0,SPM 可用
-- 验收基准文件:`~/Downloads/5R不全书（全扩展）2026.9.13.chm`(7.8MB,zh-CN/GBK)
+- 验收基准文件:`~/Downloads/DND.26.09.13.chm`(36.7MB,zh-CN/GBK)
 
 ## 测试框架:swift-testing(不是 XCTest)
 

@@ -49,7 +49,7 @@ public enum CHMSitemapParser {
         var out: [CHMIndexEntry] = []
         func walk(_ nodes: [Node]) {
             for n in nodes {
-                out.append(CHMIndexEntry(keyword: n.keyword ?? n.name ?? "", targets: n.locals))
+                out.append(CHMIndexEntry(keyword: n.indexKeyword, targets: n.locals))
                 walk(n.children)
             }
         }
@@ -61,18 +61,29 @@ public enum CHMSitemapParser {
 
     /// 通用节点(Name/Keyword/多 Local/Merge 全保留)。
     private struct Node {
-        var name: String?
+        /// 全部 Name 参数(部分 .hhk 会给同一条目多个 Name:首个别名可能是
+        /// "书\章\词条" 的层级形态,第二个才是干净词条)。
+        var names: [String] = []
         var keyword: String?
         var locals: [String] = []
         var merge: String?
         var children: [Node] = []
-        var isEmpty: Bool { name == nil && keyword == nil && locals.isEmpty && merge == nil }
+        var isEmpty: Bool { names.isEmpty && keyword == nil && locals.isEmpty && merge == nil }
+
+        /// 目录显示名:首个 Name。
+        var displayName: String? { names.first }
+
+        /// 索引词条:Keyword 优先;多个 Name 时避开含 "\\" 的层级别名。
+        var indexKeyword: String {
+            if let keyword { return keyword }
+            return names.first { !$0.contains("\\") } ?? names.first ?? ""
+        }
     }
 
     private static func mapOut(_ nodes: [Node]) -> [CHMTocItem] {
         nodes.map {
             CHMTocItem(
-                title: $0.name ?? $0.keyword ?? "",
+                title: $0.displayName ?? $0.keyword ?? "",
                 local: $0.locals.first,
                 merge: $0.merge,
                 children: mapOut($0.children)
@@ -142,7 +153,7 @@ public enum CHMSitemapParser {
                 let attrs = attributes(of: tag)
                 if let n = attrs["name"]?.lowercased(), let v = attrs["value"] {
                     switch n {
-                    case "name": if acc.name == nil { acc.name = decodeEntities(v) }
+                    case "name": acc.names.append(decodeEntities(v))
                     case "keyword": acc.keyword = decodeEntities(v)
                     case "local": acc.locals.append(decodeEntities(v))
                     case "merge": if acc.merge == nil { acc.merge = decodeEntities(v) }

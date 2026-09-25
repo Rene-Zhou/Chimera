@@ -34,16 +34,16 @@ func parsesBenchmarkSystemInfo() throws {
     let c = try CHMContainer(path: benchmarkCHMPath)
     let info = try #require(try c.systemInfo(), "基准文件应含 /#SYSTEM")
     #expect(info.lcid == 0x0804)
-    #expect(info.defaultTopic == "玩家手册2024.htm")
-    #expect(info.title?.isEmpty == false, "标题非空(实测 5R不完整版)")
+    #expect(info.defaultTopic == "写在前面.html")
+    #expect(info.title == "五版不全书")
 }
 
 @Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
 func decodesChineseEntryPaths() throws {
     let c = try CHMContainer(path: benchmarkCHMPath)
     let paths = try c.allEntries().map(\.path)
-    #expect(paths.contains("/玩家手册2024.htm"), "中文内部路径应正确解码(本文件为 UTF-8 路径)")
-    #expect(paths.contains { $0.contains("序章") })
+    #expect(paths.contains("/写在前面.html"), "中文内部路径应正确解码(本文件为 UTF-8 路径)")
+    #expect(paths.contains("/玩家手册2024/第三章：角色职业.htm"), "子目录中文路径应正确解码")
 }
 
 @Test func decodePathFallsBackToLCIDEncoding() {

@@ -52,7 +52,7 @@ if args.count >= 2 && args[1] == "about" {
         for e in entries.prefix(30) {
             print("\(e.length)\t\(e.isDirectory ? "DIR " : "    ")\(e.path)")
         }
-        for key in ["/$FIftiMain", "/5R不全书（全扩展）2026.9.13.hhc", "/5R不全书（全扩展）2026.9.13.hhk"] {
+        for key in ["/$FIftiMain", "/DND五版不全书.hhc", "/DND五版不全书.hhk"] {
             let r = container.entry(at: key)
             print("resolve \(key) -> \(r.map { "\($0.length) bytes" } ?? "nil")")
         }

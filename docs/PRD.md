@@ -7,7 +7,7 @@
 | 状态 | 已定稿 |
 | 首要用户 | 项目作者本人（TTRPG 规则书深度读者） |
 | 次要用户 | 需要阅读 CHM 技术文档 / 电子书的 macOS 用户 |
-| 验收基准文件 | `~/Downloads/5R不全书（全扩展）2026.9.13.chm`（7.8MB，zh-CN/GBK，含 .hhc 目录 + .hhk 索引 + $FIftiMain 全文检索库） |
+| 验收基准文件 | `~/Downloads/DND.26.09.13.chm`（36.7MB，zh-CN/GBK，7028 个 HTML 页，含 .hhc 目录 + .hhk 索引 + $FIftiMain 全文检索库，UTF-8 内部路径） |
 
 ---
 
@@ -122,4 +122,4 @@ macOS 上缺少一款**现代设计、原生性能、专注 CHM** 的阅读器�
 
 ---
 
-*附录：基准文件探查结果 —— ITSF v3，LCID 0x0804（zh-CN / GBK），含 `2026.9.13.hhc`（目录）、`2026.9.13.hhk`（索引）、`$FIftiMain`（全文检索库），文件大小 7.8MB。*
+*附录：基准文件探查结果 —— ITSF v3，LCID 0x0804（zh-CN / GBK），含 `DND五版不全书.hhc`（目录）、`DND五版不全书.hhk`（索引，双 Name 形态：层级别名+干净词条）、`$FIftiMain`（全文检索库），文件大小 36.7MB。*

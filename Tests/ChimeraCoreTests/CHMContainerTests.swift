@@ -32,8 +32,8 @@ func containerEnumeratesBenchmarkEntries() throws {
     let paths = Set(entries.map(\.path))
     // 目录探查(CLI list)确认的基准文件真实关键内部文件
     #expect(paths.contains("/$FIftiMain"), "应含内嵌全文检索库")
-    #expect(paths.contains("/5R不全书（全扩展）2026.9.13.hhc"), "应含目录文件")
-    #expect(paths.contains("/5R不全书（全扩展）2026.9.13.hhk"), "应含索引文件")
+    #expect(paths.contains("/DND五版不全书.hhc"), "应含目录文件")
+    #expect(paths.contains("/DND五版不全书.hhk"), "应含索引文件")
 }
 
 @Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
@@ -52,7 +52,7 @@ func containerReadsEntryBytes() throws {
     let c = try makeContainer()
 
     // .hhc 是小文件:整读,长度必须与条目元数据一致
-    let hhcPath = "/5R不全书（全扩展）2026.9.13.hhc"
+    let hhcPath = "/DND五版不全书.hhc"
     let hhc = try c.read(hhcPath)
     let meta = c.entry(at: hhcPath)
     #expect(hhc.count > 0)

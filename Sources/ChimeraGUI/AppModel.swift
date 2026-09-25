@@ -102,8 +102,6 @@ final class AppModel: ObservableObject {
         let homePath: String
         let toc: [CHMTocItem]
         let indexEntries: [CHMIndexEntry]
-        /// 文件名小写 → 内部路径(外链回投索引,见 CHMPath.mapExternalToInternal)
-        let filenameIndex: [String: String]
     }
 
     struct NavigationRequest: Equatable {
@@ -242,8 +240,7 @@ final class AppModel: ObservableObject {
             }
 
             let doc = Document(url: url, container: container, homePath: homePath,
-                               toc: toc, indexEntries: indexEntries,
-                               filenameIndex: Self.filenameIndex(from: allEntries))
+                               toc: toc, indexEntries: indexEntries)
 
             bookmarkStore = CHMBookmarkStore(
                 storageURL: ChimeraStateDir.bookmarkStorageURL(for: url))
@@ -355,16 +352,6 @@ final class AppModel: ObservableObject {
         return map
     }
 
-    /// 文件名(小写)→ 内部路径索引;同名文件先到先得,目录跳过。
-    static func filenameIndex(from entries: [CHMEntry]) -> [String: String] {
-        var map: [String: String] = [:]
-        for e in entries where !e.isDirectory {
-            let name = (e.path as NSString).lastPathComponent.lowercased()
-            if !name.isEmpty, map[name] == nil { map[name] = e.path }
-        }
-        return map
-    }
-
     func buildIndexIfNeeded() {
         guard let doc = document, searchIndex == nil, !indexBuilding else { return }
         let cacheURL = ChimeraStateDir.indexCacheURL(for: doc.url)
@@ -470,9 +457,12 @@ final class AppModel: ObservableObject {
                 return   // 结果由 findAction 订阅打印并退出
             }
             if let q = env["CHIMERA_SEARCH"], let idx = searchIndex {
-                let hits = idx.search(q)
-                print("SEARCH q=\(q) hits=\(hits.count) first=\(hits.first?.path ?? "-")")
-                guard let first = hits.first else {
+                // 走真实 UI 路径:searchQuery → runSearch()(而非绕过模型直查索引)
+                _ = idx
+                searchQuery = q
+                runSearch()
+                print("SEARCH q=\(q) hits=\(searchHits.count) total=\(searchTotal) first=\(searchHits.first?.path ?? "-")")
+                guard let first = searchHits.first else {
                     print("SMOKE OK search-nohits"); exit(0)
                 }
                 tab.pendingHighlight = q
@@ -489,19 +479,6 @@ final class AppModel: ObservableObject {
 
         case 2:
             guard textLen > 0 else { fail("stage2 textLen=\(textLen)") }
-            if env["CHIMERA_CLICK_HTTPS"] == "1" {
-                // 点击页内首个 https 链接:应被回投为容器内页面而非打开浏览器
-                tab.webView.evaluateJavaScript(
-                    "(function(){var a=document.querySelector('a[href^=\"https\"]');"
-                    + "if(!a) return 'nolink'; a.click(); return a.getAttribute('href');})()"
-                ) { r, _ in
-                    guard let href = r as? String, href != "nolink" else {
-                        print("SMOKE FAIL stage2 页面无 https 链接"); exit(1)
-                    }
-                    print("CLICK href=\(href)")
-                }
-                return
-            }
             if env["CHIMERA_RESTORE"] == "1" {
                 print("REOPEN \(tab.document.url.lastPathComponent)")
                 open(url: tab.document.url)
@@ -521,13 +498,6 @@ final class AppModel: ObservableObject {
 
         case 3:
             guard textLen > 0 else { fail("stage3 textLen=\(textLen)") }
-            if env["CHIMERA_CLICK_HTTPS"] == "1" {
-                let got = tab.currentPath ?? "-"
-                let want = env["CHIMERA_CLICK_EXPECT"] ?? ""
-                let ok = !want.isEmpty && got == want
-                print("CLICK result=\(got) expect=\(want) ok=\(ok)")
-                exit(ok ? 0 : 1)
-            }
             if env["CHIMERA_RESTORE"] == "1" {
                 let expected = env["CHIMERA_NAV"] ?? ""
                 let exp = expected.hasPrefix("/") ? expected : "/" + expected

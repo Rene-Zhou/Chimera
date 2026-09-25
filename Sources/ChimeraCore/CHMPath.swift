@@ -40,26 +40,6 @@ public enum CHMPath {
         }
         return "/" + out.joined(separator: "/")
     }
-
-    // MARK: - 外链回投
-
-    /// 将抓取源站的绝对 http(s) 链接回投为容器内页面。
-    ///
-    /// 抓取站生成的 CHM 常把站内交叉引用写成源站绝对 URL(如
-    /// `https://host/topics/…/动作.htm#Attack`)。按"末段文件名(百分号解码,
-    /// 大小写不敏感)"在 filenameIndex(文件名小写 → 内部路径)中查找;命中返回
-    /// 内部路径与原锚点,未命中返回 nil(调用方走外链兜底)。
-    public static func mapExternalToInternal(
-        _ urlString: String, filenameIndex: [String: String]
-    ) -> (path: String, fragment: String?)? {
-        guard let url = URL(string: urlString),
-              let scheme = url.scheme?.lowercased(),
-              scheme == "http" || scheme == "https" else { return nil }
-        let last = url.lastPathComponent  // URL 已做百分号解码
-        guard !last.isEmpty else { return nil }
-        guard let path = filenameIndex[last.lowercased()] else { return nil }
-        return (path, url.fragment)
-    }
 }
 
 /// 扩展名 → MIME 类型。

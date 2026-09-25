@@ -121,9 +121,9 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
     // MARK: WKNavigationDelegate
 
     /// 导航策略(离线/隐私):只允许 chm: 在 WebView 内加载;
-    /// http(s) 优先回投为容器内同名页面(抓取站生成的 CHM 常把站内交叉引用
-    /// 写成源站绝对 URL),无法回投才转外部浏览器;其他 scheme 一律取消;
-    /// target=_blank(targetFrame == nil)的 chm 链接改在当前 WebView 加载。
+    /// 用户点击的 http(s) 链接取消并转外部浏览器;iframe/重定向等静默取消;
+    /// ms-its 等其他 scheme 一律取消;target=_blank(targetFrame == nil)的
+    /// chm 链接改在当前 WebView 加载。
     func webView(_ webView: WKWebView,
                  decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
@@ -141,19 +141,11 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
                 decisionHandler(.allow)
             }
         case "http", "https":
-            // 仅用户真实点击链接才回投/转外部;iframe/重定向等静默取消
-            guard navigationAction.navigationType == .linkActivated else {
-                decisionHandler(.cancel)
-                return
-            }
-            if let hit = CHMPath.mapExternalToInternal(
-                url.absoluteString, filenameIndex: document.filenameIndex) {
-                decisionHandler(.cancel)
-                load(path: hit.path, fragment: hit.fragment)
-            } else {
+            // 仅用户真实点击链接才转外部浏览器;iframe/重定向等静默取消
+            if navigationAction.navigationType == .linkActivated {
                 NSWorkspace.shared.open(url)
-                decisionHandler(.cancel)
             }
+            decisionHandler(.cancel)
         default:
             decisionHandler(.cancel)
         }

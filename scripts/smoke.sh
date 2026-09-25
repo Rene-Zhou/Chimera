@@ -10,12 +10,12 @@
 set -u
 cd "$(dirname "$0")/.."
 
-BOOK="${CHIMERA_BOOK:-$HOME/Downloads/5R不全书（全扩展）2026.9.13.chm}"
+BOOK="${CHIMERA_BOOK:-$HOME/Downloads/DND.26.09.13.chm}"
 BIN=".build/debug/ChimeraApp"
-NAV_PATH="序章：欢迎来到冒险世界.htm"
-SEARCH_Q="玩家"
-FIND_Q="Player's"   # 含撇号,验证 JS 注入转义
-TIMEOUT=120
+NAV_PATH="速查/资源简写.htm"
+SEARCH_Q="法术"
+FIND_Q="不全书"   # 首页(写在前面.html)可见词,顺带验证 JS 注入
+TIMEOUT=180       # 36MB 书索引构建较慢,看门狗放宽
 
 if [ ! -f "$BOOK" ]; then
     echo "smoke: 找不到书: $BOOK (可用 CHIMERA_BOOK 指定)" >&2
@@ -61,8 +61,6 @@ run FIND    CHIMERA_FIND="$FIND_Q"
 run HISTORY CHIMERA_NAV="$NAV_PATH" CHIMERA_HISTORY=1
 run TABS    CHIMERA_NAV="$NAV_PATH" CHIMERA_TABS=1
 run RESTORE CHIMERA_NAV="$NAV_PATH" CHIMERA_RESTORE=1
-# 外链回投:术语释义页内的 https 源站链接应映射到容器内 /动作.htm 而非打开浏览器
-run LINKBACK CHIMERA_NAV="术语释义.htm" CHIMERA_CLICK_HTTPS=1 CHIMERA_CLICK_EXPECT="/动作.htm"
 
 echo
 if [ "$overall" -eq 0 ]; then
