@@ -88,6 +88,50 @@ final class AppModel: ObservableObject {
         findAction = FindAction(query: q, direction: next ? 1 : -1)
     }
 
+    // MARK: 历史与书签
+    @Published var history = CHMHistory()
+    @Published var currentPath: String?
+    @Published var bookmarks: [CHMBookmark] = []
+    var bookmarkStore: CHMBookmarkStore?
+    private var tocTitleMap: [String: String] = [:]
+
+    var canGoBack: Bool { history.canGoBack }
+    var canGoForward: Bool { history.canGoForward }
+    var isCurrentPageBookmarked: Bool {
+        guard let p = currentPath else { return false }
+        return bookmarkStore?.bookmarks.contains { $0.path == p } ?? false
+    }
+
+    /// 全部页面导航(含链接点击)经 didCommit 汇入历史。
+    func pageDidCommit(path: String) {
+        currentPath = path
+        history.push(path)
+    }
+
+    func goBack() {
+        if let p = history.goBack() { navigate(to: p) }
+    }
+
+    func goForward() {
+        if let p = history.goForward() { navigate(to: p) }
+    }
+
+    func toggleBookmark() {
+        guard let p = currentPath, let store = bookmarkStore else { return }
+        if store.bookmarks.contains(where: { $0.path == p }) {
+            store.remove(path: p)
+        } else {
+            let title = tocTitleMap[p] ?? tocTitleMap[String(p.dropFirst())] ?? p
+            store.add(p, title: title)
+        }
+        bookmarks = store.bookmarks
+    }
+
+    func removeBookmark(id: UUID) {
+        bookmarkStore?.remove(id: id)
+        bookmarks = bookmarkStore?.bookmarks ?? []
+    }
+
     func runSearch() {
         guard let idx = searchIndex else { searchHits = []; return }
         searchHits = idx.search(searchQuery, limit: 200)
@@ -186,6 +230,11 @@ final class AppModel: ObservableObject {
                 print("OPEN toc=\(toc.count) index=\(indexEntries.count)")
             }
 
+            bookmarkStore = CHMBookmarkStore(storageURL: CHMBookmarkStore.storageURL(for: url))
+            bookmarks = bookmarkStore?.bookmarks ?? []
+            history = CHMHistory()
+            currentPath = nil
+            tocTitleMap = Self.tocTitles(from: toc)
             document = Document(url: url, container: container, homePath: homePath,
                                 toc: toc, indexEntries: indexEntries)
             lastError = nil
@@ -230,6 +279,27 @@ struct ReaderView: View {
             ZStack(alignment: .top) {
                 if let doc = model.document {
                     WebView(document: doc, model: model).id(doc.id)
+                        .toolbar {
+                            ToolbarItemGroup(placement: .navigation) {
+                                Button { model.goBack() } label: {
+                                    Image(systemName: "chevron.backward")
+                                }
+                                .disabled(!model.canGoBack)
+                                .keyboardShortcut("[", modifiers: .command)
+                                Button { model.goForward() } label: {
+                                    Image(systemName: "chevron.forward")
+                                }
+                                .disabled(!model.canGoForward)
+                                .keyboardShortcut("]", modifiers: .command)
+                            }
+                            ToolbarItem(placement: .primaryAction) {
+                                Button { model.toggleBookmark() } label: {
+                                    Image(systemName: model.isCurrentPageBookmarked
+                                          ? "bookmark.fill" : "bookmark")
+                                }
+                                .disabled(model.currentPath == nil)
+                            }
+                        }
                 } else {
                 VStack(spacing: 14) {
                     Image(systemName: "book")
@@ -289,7 +359,7 @@ struct SidebarView: View {
     // 本地 UI 状态改由 ObservableObject 持有(@StateObject 已验证可用,见 DEV_ENV.md)
     @StateObject private var state = SidebarState()
 
-    enum SidebarTab: Hashable { case toc, index, search }
+    enum SidebarTab: Hashable { case toc, index, search, marks }
 
     final class SidebarState: ObservableObject {
         @Published var tab = SidebarTab.toc
@@ -302,6 +372,7 @@ struct SidebarView: View {
                 Text("目录").tag(SidebarTab.toc)
                 Text("索引").tag(SidebarTab.index)
                 Text("搜索").tag(SidebarTab.search)
+                Text("书签").tag(SidebarTab.marks)
             }
             .pickerStyle(.segmented)
             .padding(8)
@@ -366,6 +437,28 @@ struct SidebarView: View {
                                 .padding(.vertical, 2)
                             }
                             .buttonStyle(.plain)
+                        }
+                    }
+                }
+            case .marks:
+                Group {
+                    if model.bookmarks.isEmpty {
+                        Text("暂无书签(工具栏 ⚑ 添加)")
+                            .foregroundStyle(.secondary).font(.caption).padding()
+                    } else {
+                        List(model.bookmarks) { bm in
+                            HStack {
+                                Image(systemName: "bookmark.fill")
+                                    .foregroundStyle(.yellow).font(.caption)
+                                Text(bm.title).lineLimit(1)
+                                Spacer()
+                                Button { model.removeBookmark(id: bm.id) } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                }
+                                .buttonStyle(.borderless).foregroundStyle(.secondary)
+                            }
+                            .contentShape(Rectangle())
+                            .onTapGesture { model.navigate(to: bm.path) }
                         }
                     }
                 }
@@ -456,18 +549,7 @@ struct WebView: NSViewRepresentable {
     }
 
     func updateNSView(_ wv: WKWebView, context: Context) {
-        if let req = model.navigationRequest,
-           context.coordinator.handledRequestID != req.id {
-            context.coordinator.handledRequestID = req.id
-            let path = req.path.hasPrefix("/") ? req.path : "/" + req.path
-            var comps = URLComponents()
-            comps.scheme = "chm"
-            comps.host = "doc"
-            comps.path = path
-            if let u = comps.url {
-                wv.load(URLRequest(url: u))
-            }
-        }
+        // 导航与页内查找已由 Coordinator 的 Combine 订阅驱动(updateNSView 不可靠)
         if context.coordinator.loadedDocumentID != document.id {
             load(document, into: wv, coordinator: context.coordinator)
         }
@@ -564,6 +646,24 @@ struct WebView: NSViewRepresentable {
                             print("FIND q=\(act.query) status=\(status)")
                             exit(status.hasPrefix("0/") ? 1 : 0)
                         }
+                    }
+                }
+                .store(in: &cancellables)
+
+            // 所有导航经 Combine 驱动(updateNSView 差异比对不可靠)
+            model.$navigationRequest
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] req in
+                    guard let self, let req, self.handledRequestID != req.id,
+                          let wv = self.webView else { return }
+                    self.handledRequestID = req.id
+                    let path = req.path.hasPrefix("/") ? req.path : "/" + req.path
+                    var comps = URLComponents()
+                    comps.scheme = "chm"
+                    comps.host = "doc"
+                    comps.path = path
+                    if let u = comps.url {
+                        wv.load(URLRequest(url: u))
                     }
                 }
                 .store(in: &cancellables)
@@ -675,10 +775,26 @@ struct WebView: NSViewRepresentable {
                             exit(0)
                         }
                     }
+                } else if self.smokeStage == 2,
+                          ProcessInfo.processInfo.environment["CHIMERA_HISTORY"] == "1" {
+                    // 历史链路:第二页后回退,第三阶段校验回到默认页
+                    self.model.goBack()
                 } else {
+                    if ProcessInfo.processInfo.environment["CHIMERA_HISTORY"] == "1",
+                       self.smokeStage >= 3 {
+                        let homeOK = webView.url?.path == self.model.document?.homePath
+                        print("HISTORY back=\(webView.url?.path ?? "-") homeOK=\(homeOK)")
+                        exit(homeOK ? 0 : 1)
+                    }
                     print("SMOKE OK url2=\(webView.url?.absoluteString ?? "-") textLen=\(len)")
                     exit(0)
                 }
+            }
+        }
+
+        func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+            if let url = webView.url, url.scheme?.lowercased() == "chm" {
+                model.pageDidCommit(path: url.path)
             }
         }
 
