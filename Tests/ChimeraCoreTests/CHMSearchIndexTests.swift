@@ -2,9 +2,6 @@ import Testing
 import Foundation
 @testable import ChimeraCore
 
-private let benchmarkPath =
-    NSString(string: "~/Downloads/5R不全书（全扩展）2026.9.13.chm").expandingTildeInPath
-
 // MARK: - 文本抽取
 
 @Test func extractsTitleAndPlainText() {
@@ -71,6 +68,35 @@ private let benchmarkPath =
     #expect(many.search("命中", limit: 10).count == 10)
 }
 
+@Test func searchRanksTitleMatchesFirst() {
+    let docs = [
+        CHMSearchDocument(path: "/a.htm", title: "无标题命中", text: "这里有法术说明"),
+        CHMSearchDocument(path: "/b.htm", title: "法术大全", text: "无关正文"),
+        CHMSearchDocument(path: "/c.htm", title: "其他", text: "正文也有法术"),
+    ]
+    let idx = CHMSearchIndex(documents: docs)
+    let results = idx.searchResults("法术")
+    // 仅标题命中的 /b.htm 也应计入结果,且标题命中排在正文命中之前
+    #expect(results.total == 3)
+    #expect(results.hits.map(\.path) == ["/b.htm", "/a.htm", "/c.htm"])
+    #expect(results.hits[0].isTitleMatch)
+    #expect(results.hits[0].snippet.contains("法术大全"), "仅标题命中时摘要取自标题")
+    #expect(!results.hits[1].isTitleMatch)
+    // 旧 API 兼容:search 返回 hits 部分
+    #expect(idx.search("法术").map(\.path) == results.hits.map(\.path))
+}
+
+@Test func searchReportsTotalBeyondLimit() {
+    let many = CHMSearchIndex(documents: (0..<50).map {
+        CHMSearchDocument(path: "/p\($0).htm", title: "P", text: "命中")
+    })
+    let results = many.searchResults("命中", limit: 10)
+    #expect(results.hits.count == 10)
+    #expect(results.total == 50, "limit 截断不影响 total")
+    // 空查询:total 为 0
+    #expect(many.searchResults("   ").total == 0)
+}
+
 // MARK: - 缓存
 
 @Test func cacheRoundtripAndStableKey() throws {
@@ -90,17 +116,17 @@ private let benchmarkPath =
     #expect(CHMSearchIndex.load(from: url.appendingPathComponent("nope")) == nil)
 
     // 同一文件(未变更)应得到稳定缓存键
-    let bench = URL(fileURLWithPath: benchmarkPath)
-    if FileManager.default.fileExists(atPath: benchmarkPath) {
+    if benchmarkCHMExists {
+        let bench = URL(fileURLWithPath: benchmarkCHMPath)
         #expect(CHMSearchIndex.cacheURL(for: bench) == CHMSearchIndex.cacheURL(for: bench))
     }
 }
 
 // MARK: - 基准集成(记录耗时)
 
-@Test func buildsIndexFromBenchmark() throws {
-    try #require(FileManager.default.fileExists(atPath: benchmarkPath), "基准文件缺失")
-    let c = try CHMContainer(path: benchmarkPath)
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func buildsIndexFromBenchmark() throws {
+    let c = try CHMContainer(path: benchmarkCHMPath)
     let started = Date()
     let idx = try CHMSearchIndex.build(container: c)
     let elapsed = Date().timeIntervalSince(started)
@@ -112,7 +138,7 @@ private let benchmarkPath =
     #expect(hits.allSatisfy { !$0.title.isEmpty })
 
     // 缓存保存/加载(真实路径)
-    let cache = CHMSearchIndex.cacheURL(for: URL(fileURLWithPath: benchmarkPath))
+    let cache = CHMSearchIndex.cacheURL(for: URL(fileURLWithPath: benchmarkCHMPath))
     defer { try? FileManager.default.removeItem(at: cache) }
     try idx.save(to: cache)
     let loaded = try #require(try CHMSearchIndex.load(from: cache))

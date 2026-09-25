@@ -64,6 +64,26 @@ public enum CHMCharset {
     public static func encoding(forLCID lcid: UInt32) -> String.Encoding? {
         name(forLCID: lcid).flatMap(encoding(forIANA:))
     }
+
+    /// 从前 4KB 粗提 `<meta charset=…>` 声明(与渲染管线 CHMSchemeHandler 行为一致)。
+    /// 兼容单/双引号包裹与无引号(以空白/`;`/`>`/引号 结尾)两种形态;无声明返回 nil。
+    public static func declared(in data: Data) -> String? {
+        let head = String(decoding: data.prefix(4096), as: UTF8.self)
+        guard let r = head.range(of: "charset=", options: .caseInsensitive) else { return nil }
+        var s = head[r.upperBound...]
+        if s.first == "\"" || s.first == "'" {
+            let quote = s.removeFirst()
+            guard let end = s.firstIndex(of: quote) else { return nil }
+            s = s[..<end]
+        } else if let end = s.firstIndex(where: {
+            // http-equiv 形态下 charset 值常以属性闭引号结尾,故引号也算终止符
+            $0 == ";" || $0 == ">" || $0 == "\"" || $0 == "'" || $0.isWhitespace
+        }) {
+            s = s[..<end]
+        }
+        let name = s.trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? nil : name
+    }
 }
 
 /// CHM 文本解码器:PRD F2 的三级回退策略。
@@ -127,5 +147,11 @@ public struct CHMTextDecoder {
 
         // 6) 有损
         return String(decoding: data, as: UTF8.self)
+    }
+
+    /// 按页解码:每页独立嗅探 `<meta charset>` 声明(与渲染管线一致),再走完整回退链。
+    /// 搜索索引构建等批量场景应使用本方法,而非对全部页面共用单一 decoder。
+    public static func decode(_ data: Data, lcid: UInt32?) -> String {
+        CHMTextDecoder(lcid: lcid, declaredCharset: CHMCharset.declared(in: data)).decode(data)
     }
 }

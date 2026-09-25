@@ -6,9 +6,6 @@ import Foundation
 // DWORD version + { WORD code, WORD len, data[len] }*N
 // code 2=默认页(容器编码) code 3=标题 code 4=LCID(DWORD)
 
-private let benchmarkPath =
-    NSString(string: "~/Downloads/5R不全书（全扩展）2026.9.13.chm").expandingTildeInPath
-
 private func u16(_ v: UInt16) -> [UInt8] { [UInt8(v & 0xFF), UInt8(v >> 8)] }
 private func u32(_ v: UInt32) -> [UInt8] {
     [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF), UInt8((v >> 16) & 0xFF), UInt8((v >> 24) & 0xFF)]
@@ -32,17 +29,18 @@ private func entry(_ code: UInt16, _ data: [UInt8]) -> [UInt8] {
     #expect(CHMSystemInfoParser.parse(Data([0x01])) == nil)
 }
 
-@Test func parsesBenchmarkSystemInfo() throws {
-    try #require(FileManager.default.fileExists(atPath: benchmarkPath), "基准文件缺失")
-    let c = try CHMContainer(path: benchmarkPath)
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func parsesBenchmarkSystemInfo() throws {
+    let c = try CHMContainer(path: benchmarkCHMPath)
     let info = try #require(try c.systemInfo(), "基准文件应含 /#SYSTEM")
     #expect(info.lcid == 0x0804)
     #expect(info.defaultTopic == "玩家手册2024.htm")
     #expect(info.title?.isEmpty == false, "标题非空(实测 5R不完整版)")
 }
 
-@Test func decodesChineseEntryPaths() throws {
-    let c = try CHMContainer(path: benchmarkPath)
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func decodesChineseEntryPaths() throws {
+    let c = try CHMContainer(path: benchmarkCHMPath)
     let paths = try c.allEntries().map(\.path)
     #expect(paths.contains("/玩家手册2024.htm"), "中文内部路径应正确解码(本文件为 UTF-8 路径)")
     #expect(paths.contains { $0.contains("序章") })

@@ -2,18 +2,10 @@ import Testing
 import Foundation
 import CChmlib
 
-/// 验收基准文件:5R不全书(7.8MB,zh-CN/GBK,含 .hhc/.hhk/$FIftiMain)
-private let benchmarkPath =
-    NSString(string: "~/Downloads/5R不全书（全扩展）2026.9.13.chm").expandingTildeInPath
-
 /// m1-2 桥接冒烟:证明 vendored chmlib 能在 Swift 侧编译、打开并遍历真实 CHM。
-@Test func chmlibOpensAndEnumeratesBenchmarkFile() throws {
-    try #require(
-        FileManager.default.fileExists(atPath: benchmarkPath),
-        "基准 CHM 文件不存在:\(benchmarkPath)"
-    )
-
-    guard let file = chm_open(benchmarkPath) else {
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func chmlibOpensAndEnumeratesBenchmarkFile() throws {
+    guard let file = chm_open(benchmarkCHMPath) else {
         Issue.record("chm_open 返回 NULL")
         return
     }

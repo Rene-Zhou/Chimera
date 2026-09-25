@@ -60,3 +60,52 @@ import Foundation
     #expect(CHMTextDecoder(lcid: 0x0804, declaredCharset: nil).decode(ascii)
             == "<!DOCTYPE HTML PUBLIC>")
 }
+
+// MARK: - meta charset 嗅探(CHMCharset.declared(in:))
+
+@Test func sniffsDeclaredCharsetQuotedVariants() {
+    // 双引号
+    #expect(CHMCharset.declared(in: Data(#"<meta charset="utf-8">"#.utf8)) == "utf-8")
+    // 单引号
+    #expect(CHMCharset.declared(in: Data("<meta charset='GBK'>".utf8)) == "GBK")
+    // 无引号(以 > 结尾)
+    #expect(CHMCharset.declared(in: Data("<meta charset=Big5>".utf8)) == "Big5")
+    // 无引号(以空白结尾)
+    #expect(CHMCharset.declared(in: Data("<meta charset=gbk >".utf8)) == "gbk")
+    // 分号结尾(http-equiv 形态)
+    #expect(CHMCharset.declared(in:
+        Data(#"<meta http-equiv="Content-Type" content="text/html; charset=windows-1251">"#.utf8))
+        == "windows-1251")
+}
+
+@Test func sniffsDeclaredCharsetCaseInsensitive() {
+    #expect(CHMCharset.declared(in: Data(#"<META CHARSET="Shift_JIS">"#.utf8)) == "Shift_JIS")
+    #expect(CHMCharset.declared(in: Data("<meta CharSet=euc-jp>".utf8)) == "euc-jp")
+}
+
+@Test func declaredCharsetNilWhenAbsent() {
+    #expect(CHMCharset.declared(in: Data("<html><body>无声明</body></html>".utf8)) == nil)
+    #expect(CHMCharset.declared(in: Data()) == nil)
+    // 引号未闭合 → nil
+    #expect(CHMCharset.declared(in: Data(#"<meta charset="utf-8"#.utf8)) == nil)
+}
+
+@Test func declaredCharsetBeyond4KBNotFound() {
+    // 声明出现在前 4KB 之外 → 找不到(与渲染管线一致,只嗅探头部)
+    let pad = String(repeating: " ", count: 5000)
+    #expect(CHMCharset.declared(in: Data((pad + "<meta charset=utf-8>").utf8)) == nil)
+}
+
+// MARK: - 按页解码(搜索索引构建与渲染管线共用)
+
+@Test func decodePerPageHonoursDeclaredCharsetOverLCID() {
+    // zh-CN LCID(默认 GBK),但页面声明 Big5:应按 Big5 解码
+    let html = Data("<meta charset=Big5>".utf8) + Data([0xAA, 0x6B, 0xB3, 0x4E]) // 法術
+    #expect(CHMTextDecoder.decode(html, lcid: 0x0804).contains("法術"))
+}
+
+@Test func decodePerPageFallsBackToLCIDWithoutDeclaration() {
+    // 无声明:回退到 LCID(zh-CN → GBK)
+    let gbk = Data([0xB7, 0xA8, 0xCA, 0xF5]) // 法术
+    #expect(CHMTextDecoder.decode(gbk, lcid: 0x0804) == "法术")
+}

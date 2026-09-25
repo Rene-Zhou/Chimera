@@ -114,7 +114,7 @@ public struct CHMSearchIndex: Codable {
         self.documents = documents
     }
 
-    /// 从容器构建:遍历全部 HTML 条目,读取→解码→标题→纯文本。
+    /// 从容器构建:遍历全部 HTML 条目,读取→按页解码(每页嗅探 charset 声明)→标题→纯文本。
     /// - Parameters:
     ///   - tocTitles: TOC 映射(local 路径(带/不带前导 /)→ 标题),优先作为标题
     ///   - progress: 每完成一页回调 (done, total)
@@ -124,7 +124,6 @@ public struct CHMSearchIndex: Codable {
         progress: ((Int, Int) -> Void)? = nil
     ) throws -> CHMSearchIndex {
         let info = try container.systemInfo()
-        let decoder = CHMTextDecoder(lcid: info?.lcid)
         let entries = try container.allEntries().filter { entry in
             !entry.isDirectory
                 && ["htm", "html"].contains((entry.path as NSString).pathExtension.lowercased())
@@ -134,7 +133,7 @@ public struct CHMSearchIndex: Codable {
         docs.reserveCapacity(entries.count)
         for (i, entry) in entries.enumerated() {
             if let data = try? container.read(entry.path) {
-                let html = decoder.decode(data)
+                let html = CHMTextDecoder.decode(data, lcid: info?.lcid)
                 let bare = String(entry.path.dropFirst())
                 let title = tocTitles[entry.path] ?? tocTitles[bare]
                     ?? CHMTextExtractor.title(from: html) ?? entry.path
@@ -148,24 +147,49 @@ public struct CHMSearchIndex: Codable {
         return CHMSearchIndex(documents: docs)
     }
 
-    /// 大小写不敏感子串搜索;每文档记首个命中;结果按文档顺序。
+    /// 大小写不敏感子串搜索;等价于 `searchResults(query, limit:).hits`。
     public func search(_ query: String, limit: Int = 100) -> [CHMSearchHit] {
+        searchResults(query, limit: limit).hits
+    }
+
+    /// 大小写不敏感子串搜索:标题命中优先于正文命中,同级按文档顺序;
+    /// `total` 为未应用 limit 截断前的总命中文档数。
+    public func searchResults(_ query: String, limit: Int = 100) -> CHMSearchResults {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { return [] }
-        var hits: [CHMSearchHit] = []
+        guard !q.isEmpty else { return CHMSearchResults(hits: [], total: 0) }
+        var titleHits: [CHMSearchHit] = []
+        var bodyHits: [CHMSearchHit] = []
         for doc in documents {
-            if let r = doc.text.range(of: q, options: .caseInsensitive) {
+            let titleRange = doc.title.range(of: q, options: .caseInsensitive)
+            let textRange = doc.text.range(of: q, options: .caseInsensitive)
+            guard titleRange != nil || textRange != nil else { continue }
+            let hit: CHMSearchHit
+            if let r = textRange {
                 let offset = doc.text.distance(from: doc.text.startIndex, to: r.lowerBound)
-                hits.append(CHMSearchHit(
+                hit = CHMSearchHit(
                     path: doc.path,
                     title: doc.title,
                     snippet: CHMSnippet.around(offset, in: doc.text),
-                    offset: offset
-                ))
-                if hits.count >= limit { break }
+                    offset: offset,
+                    isTitleMatch: titleRange != nil
+                )
+            } else if let r = titleRange {
+                // 仅标题命中:摘要与偏移取自标题
+                let offset = doc.title.distance(from: doc.title.startIndex, to: r.lowerBound)
+                hit = CHMSearchHit(
+                    path: doc.path,
+                    title: doc.title,
+                    snippet: CHMSnippet.around(offset, in: doc.title),
+                    offset: offset,
+                    isTitleMatch: true
+                )
+            } else {
+                continue
             }
+            if titleRange != nil { titleHits.append(hit) } else { bodyHits.append(hit) }
         }
-        return hits
+        let all = titleHits + bodyHits
+        return CHMSearchResults(hits: Array(all.prefix(limit)), total: all.count)
     }
 
     // MARK: - 缓存
@@ -202,6 +226,21 @@ public struct CHMSearchHit: Equatable, Sendable {
     public let path: String
     public let title: String
     public let snippet: String
-    /// 命中起点在正文纯文本中的字符偏移(首个命中)。
+    /// 命中起点偏移:正文命中时为正文纯文本中的字符偏移;仅标题命中时为标题内偏移。
     public let offset: Int
+    /// 标题是否命中(标题命中的结果排在正文命中之前)。
+    public let isTitleMatch: Bool
+}
+
+/// 搜索结果:截断后的命中列表 + 未截断的总命中文档数。
+public struct CHMSearchResults: Equatable, Sendable {
+    /// 应用 limit 后的命中列表(标题命中优先,同级按文档顺序)。
+    public let hits: [CHMSearchHit]
+    /// 未应用 limit 前的总命中文档数。
+    public let total: Int
+
+    public init(hits: [CHMSearchHit], total: Int) {
+        self.hits = hits
+        self.total = total
+    }
 }

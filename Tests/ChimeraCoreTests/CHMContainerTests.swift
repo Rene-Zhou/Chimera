@@ -3,12 +3,9 @@ import Foundation
 @testable import ChimeraCore
 
 /// CHMContainer API 契约测试(基准文件快照数据)
-private let benchmarkPath =
-    NSString(string: "~/Downloads/5R不全书（全扩展）2026.9.13.chm").expandingTildeInPath
-
 private func makeContainer() throws -> CHMContainer {
-    try #require(FileManager.default.fileExists(atPath: benchmarkPath), "基准文件缺失")
-    return try CHMContainer(path: benchmarkPath)
+    try #require(benchmarkCHMExists, "基准文件缺失")
+    return try CHMContainer(path: benchmarkCHMPath)
 }
 
 @Test func containerRejectsMissingFile() {
@@ -26,7 +23,8 @@ private func makeContainer() throws -> CHMContainer {
     }
 }
 
-@Test func containerEnumeratesBenchmarkEntries() throws {
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func containerEnumeratesBenchmarkEntries() throws {
     let c = try makeContainer()
     let entries = try c.allEntries()
     #expect(entries.count > 100, "基准文件条目数应远超 100,实际 \(entries.count)")
@@ -38,7 +36,8 @@ private func makeContainer() throws -> CHMContainer {
     #expect(paths.contains("/5R不全书（全扩展）2026.9.13.hhk"), "应含索引文件")
 }
 
-@Test func containerResolvesEntryByPath() throws {
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func containerResolvesEntryByPath() throws {
     let c = try makeContainer()
     let fifti = c.entry(at: "/$FIftiMain")
     #expect(fifti != nil)
@@ -48,7 +47,8 @@ private func makeContainer() throws -> CHMContainer {
     #expect(c.entry(at: "/definitely/not/here.htm") == nil)
 }
 
-@Test func containerReadsEntryBytes() throws {
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func containerReadsEntryBytes() throws {
     let c = try makeContainer()
 
     // .hhc 是小文件:整读,长度必须与条目元数据一致
@@ -70,9 +70,9 @@ private func makeContainer() throws -> CHMContainer {
     #expect(tail.count == 16)
 }
 
-@Test func containerThrowsOnMissingEntryRead() throws {
-    try #require(FileManager.default.fileExists(atPath: benchmarkPath), "基准文件缺失")
-    let c = try CHMContainer(path: benchmarkPath)
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func containerThrowsOnMissingEntryRead() throws {
+    let c = try CHMContainer(path: benchmarkCHMPath)
     #expect(throws: CHMError.entryNotFound("/ghost.htm")) {
         _ = try c.read("/ghost.htm")
     }
