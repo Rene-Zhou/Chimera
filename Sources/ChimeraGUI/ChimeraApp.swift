@@ -137,7 +137,6 @@ final class AppModel: ObservableObject {
     static weak var shared: AppModel?
 
     init() {
-        Self.shared = self
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Chimera", isDirectory: true)
         settingsStore = CHMSettingsStore(storageURL: dir.appendingPathComponent("Settings.json"))
@@ -145,6 +144,7 @@ final class AppModel: ObservableObject {
             storageURL: dir.appendingPathComponent("ReadingState.json"))
         settings = settingsStore.settings
         recents = readingStateStore.recents
+        Self.shared = self
         if let auto = ProcessInfo.processInfo.environment["CHIMERA_AUTO_OPEN"] {
             open(url: URL(fileURLWithPath: (auto as NSString).expandingTildeInPath))
         }
