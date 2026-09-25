@@ -12,12 +12,18 @@ struct ChimeraApp: App {
     var body: some Scene {
         WindowGroup("Chimera") {
             ReaderView(model: model)
-                .frame(minWidth: 760, minHeight: 520)
+                .frame(minWidth: 820, minHeight: 560)
         }
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("打开…") { model.openPanel() }
                     .keyboardShortcut("o", modifiers: .command)
+                Button("新建标签页") { model.newTab() }
+                    .keyboardShortcut("t", modifiers: .command)
+                    .disabled(model.tabs.isEmpty)
+                Button("关闭标签页") { model.closeActiveTab() }
+                    .keyboardShortcut("w", modifiers: .command)
+                    .disabled(model.tabs.isEmpty)
             }
             CommandGroup(after: .textEditing) {
                 Button("页内查找…") { model.findVisible = true }
@@ -35,36 +41,34 @@ final class AppModel: ObservableObject {
         let id = UUID()
         let url: URL
         let container: CHMContainer
-        let homePath: String   // 如 "/玩家手册2024.htm"
+        let homePath: String
         let toc: [CHMTocItem]
         let indexEntries: [CHMIndexEntry]
     }
 
-    /// 侧栏/页内触发的导航请求。
     struct NavigationRequest: Equatable {
         let id = UUID()
         let path: String
     }
 
-    @Published var navigationRequest: NavigationRequest?
+    // MARK: 标签
 
-    func navigate(to local: String) {
-        guard !local.isEmpty else { return }
-        navigationRequest = NavigationRequest(path: local)
-    }
-
-    @Published var document: Document?
+    @Published var tabs: [ReaderTab] = []
+    @Published var activeTabID: UUID?
     @Published var lastError: String?
 
-    // MARK: 全书搜索
+    var activeTab: ReaderTab? { tabs.first { $0.id == activeTabID } }
+    var document: Document? { tabs.first?.document }
+
+    // MARK: 全书搜索(书级,同书标签共享)
+
     @Published var searchQuery = ""
     @Published var searchIndex: CHMSearchIndex?
     @Published var indexBuilding = false
     @Published var searchHits: [CHMSearchHit] = []
-    /// 搜索跳转后待高亮的检索词
-    var pendingHighlight: String?
 
     // MARK: 页内查找
+
     struct FindAction: Equatable {
         let id = UUID()
         let query: String
@@ -76,121 +80,29 @@ final class AppModel: ObservableObject {
     @Published var findStatus = ""
     @Published var findAction: FindAction?
 
-    func startFind() {
-        let q = findQuery.trimmingCharacters(in: .whitespaces)
-        guard !q.isEmpty else { findStatus = ""; return }
-        findAction = FindAction(query: q, direction: 0)
-    }
+    // MARK: 书签(书级)
 
-    func triggerFind(next: Bool) {
-        let q = findQuery.trimmingCharacters(in: .whitespaces)
-        guard !q.isEmpty else { findStatus = ""; return }
-        findAction = FindAction(query: q, direction: next ? 1 : -1)
-    }
-
-    // MARK: 历史与书签
-    @Published var history = CHMHistory()
-    @Published var currentPath: String?
     @Published var bookmarks: [CHMBookmark] = []
     var bookmarkStore: CHMBookmarkStore?
     private var tocTitleMap: [String: String] = [:]
 
-    var canGoBack: Bool { history.canGoBack }
-    var canGoForward: Bool { history.canGoForward }
+    var canGoBack: Bool { activeTab?.history.canGoBack ?? false }
+    var canGoForward: Bool { activeTab?.history.canGoForward ?? false }
     var isCurrentPageBookmarked: Bool {
-        guard let p = currentPath else { return false }
+        guard let p = activeTab?.currentPath else { return false }
         return bookmarkStore?.bookmarks.contains { $0.path == p } ?? false
     }
 
-    /// 全部页面导航(含链接点击)经 didCommit 汇入历史。
-    func pageDidCommit(path: String) {
-        currentPath = path
-        history.push(path)
-    }
-
-    func goBack() {
-        if let p = history.goBack() { navigate(to: p) }
-    }
-
-    func goForward() {
-        if let p = history.goForward() { navigate(to: p) }
-    }
-
-    func toggleBookmark() {
-        guard let p = currentPath, let store = bookmarkStore else { return }
-        if store.bookmarks.contains(where: { $0.path == p }) {
-            store.remove(path: p)
-        } else {
-            let title = tocTitleMap[p] ?? tocTitleMap[String(p.dropFirst())] ?? p
-            store.add(p, title: title)
-        }
-        bookmarks = store.bookmarks
-    }
-
-    func removeBookmark(id: UUID) {
-        bookmarkStore?.remove(id: id)
-        bookmarks = bookmarkStore?.bookmarks ?? []
-    }
-
-    func runSearch() {
-        guard let idx = searchIndex else { searchHits = []; return }
-        searchHits = idx.search(searchQuery, limit: 200)
-    }
-
-    /// TOC local 路径 → 标题映射(索引用)
-    static func tocTitles(from items: [CHMTocItem]) -> [String: String] {
-        var map: [String: String] = [:]
-        func walk(_ items: [CHMTocItem]) {
-            for it in items {
-                if let l = it.local {
-                    if map[l] == nil { map[l] = it.title }
-                    if map["/" + l] == nil { map["/" + l] = it.title }
-                }
-                walk(it.children)
-            }
-        }
-        walk(items)
-        return map
-    }
-
-    /// 构建或加载(缓存命中即跳过重建);冒烟模式下同步以便脚本化验收。
-    func buildIndexIfNeeded() {
-        guard let doc = document, searchIndex == nil, !indexBuilding else { return }
-        let cacheURL = CHMSearchIndex.cacheURL(for: doc.url)
-        let smoke = ProcessInfo.processInfo.environment["CHIMERA_SMOKE"] == "1"
-
-        if smoke {
-            indexBuilding = true
-            let idx = CHMSearchIndex.load(from: cacheURL)
-                ?? (try? CHMSearchIndex.build(container: doc.container,
-                                              tocTitles: Self.tocTitles(from: doc.toc)))
-            indexBuilding = false
-            searchIndex = idx
-            if let idx { try? idx.save(to: cacheURL) }
-            return
-        }
-
-        // 正常模式:后台构建,不卡 UI
-        indexBuilding = true
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            var idx = CHMSearchIndex.load(from: cacheURL)
-            if idx == nil {
-                idx = try? CHMSearchIndex.build(container: doc.container,
-                                                tocTitles: Self.tocTitles(from: doc.toc))
-                if let built = idx { try? built.save(to: cacheURL) }
-            }
-            DispatchQueue.main.async {
-                self?.searchIndex = idx
-                self?.indexBuilding = false
-            }
-        }
-    }
+    private var smokeStage = 0
+    private var smoke: Bool { ProcessInfo.processInfo.environment["CHIMERA_SMOKE"] == "1" }
 
     init() {
         if let auto = ProcessInfo.processInfo.environment["CHIMERA_AUTO_OPEN"] {
             open(url: URL(fileURLWithPath: (auto as NSString).expandingTildeInPath))
         }
     }
+
+    // MARK: 打开
 
     func openPanel() {
         let panel = NSOpenPanel()
@@ -226,30 +138,231 @@ final class AppModel: ObservableObject {
                 let text = CHMTextDecoder(lcid: info?.lcid).decode(try container.read(hhk))
                 indexEntries = CHMSitemapParser.parseIndex(text)
             }
-            if ProcessInfo.processInfo.environment["CHIMERA_SMOKE"] == "1" {
+            if smoke {
                 print("OPEN toc=\(toc.count) index=\(indexEntries.count)")
             }
 
+            let doc = Document(url: url, container: container, homePath: homePath,
+                               toc: toc, indexEntries: indexEntries)
+
             bookmarkStore = CHMBookmarkStore(storageURL: CHMBookmarkStore.storageURL(for: url))
             bookmarks = bookmarkStore?.bookmarks ?? []
-            history = CHMHistory()
-            currentPath = nil
             tocTitleMap = Self.tocTitles(from: toc)
-            document = Document(url: url, container: container, homePath: homePath,
-                                toc: toc, indexEntries: indexEntries)
+
+            let tab = ReaderTab(document: doc, model: self, loadPath: nil)
+            tabs = [tab]
+            activeTabID = tab.id
             lastError = nil
             buildIndexIfNeeded()
         } catch {
-            document = nil
+            tabs = []
+            activeTabID = nil
             lastError = "\(error)"
-            if ProcessInfo.processInfo.environment["CHIMERA_SMOKE"] == "1" {
+            if smoke {
                 print("SMOKE FAIL \(error)")
                 exit(1)
             }
         }
     }
 
-    /// 从前 4KB 粗提 <meta charset=…>(ASCII 层面扫描,解码前调用)。
+    // MARK: 标签管理
+
+    /// 同书新标签(默认页);指定 path 时打开对应章节。
+    @discardableResult
+    func newTab(path: String? = nil) -> ReaderTab? {
+        guard let doc = document else { return nil }
+        let tab = ReaderTab(document: doc, model: self, loadPath: path)
+        tabs.append(tab)
+        activeTabID = tab.id
+        return tab
+    }
+
+    /// 侧栏"在新标签页打开"。
+    func openInNewTab(_ path: String) {
+        guard newTab(path: path) != nil else { return }
+    }
+
+    func closeActiveTab() {
+        closeTab(id: activeTabID)
+    }
+
+    func closeTab(id: UUID?) {
+        guard let id else { return }
+        tabs.removeAll { $0.id == id }
+        if activeTabID == id {
+            activeTabID = tabs.last?.id
+        }
+    }
+
+    // MARK: 导航
+
+    func navigate(to local: String) {
+        activeTab?.requestNav(local)
+    }
+
+    func goBack() { activeTab?.goBack() }
+    func goForward() { activeTab?.goForward() }
+
+    // MARK: 搜索 / 查找 / 书签
+
+    func runSearch() {
+        guard let idx = searchIndex else { searchHits = []; return }
+        searchHits = idx.search(searchQuery, limit: 200)
+    }
+
+    static func tocTitles(from items: [CHMTocItem]) -> [String: String] {
+        var map: [String: String] = [:]
+        func walk(_ items: [CHMTocItem]) {
+            for it in items {
+                if let l = it.local {
+                    if map[l] == nil { map[l] = it.title }
+                    if map["/" + l] == nil { map["/" + l] = it.title }
+                }
+                walk(it.children)
+            }
+        }
+        walk(items)
+        return map
+    }
+
+    func buildIndexIfNeeded() {
+        guard let doc = document, searchIndex == nil, !indexBuilding else { return }
+        let cacheURL = CHMSearchIndex.cacheURL(for: doc.url)
+
+        if smoke {
+            indexBuilding = true
+            let idx = CHMSearchIndex.load(from: cacheURL)
+                ?? (try? CHMSearchIndex.build(container: doc.container,
+                                              tocTitles: Self.tocTitles(from: doc.toc)))
+            indexBuilding = false
+            searchIndex = idx
+            if let idx { try? idx.save(to: cacheURL) }
+            return
+        }
+
+        indexBuilding = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var idx = CHMSearchIndex.load(from: cacheURL)
+            if idx == nil {
+                idx = try? CHMSearchIndex.build(container: doc.container,
+                                                tocTitles: Self.tocTitles(from: doc.toc))
+                if let built = idx { try? built.save(to: cacheURL) }
+            }
+            DispatchQueue.main.async {
+                self?.searchIndex = idx
+                self?.indexBuilding = false
+            }
+        }
+    }
+
+    func startFind() {
+        let q = findQuery.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { findStatus = ""; return }
+        findAction = FindAction(query: q, direction: 0)
+    }
+
+    func triggerFind(next: Bool) {
+        let q = findQuery.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { findStatus = ""; return }
+        findAction = FindAction(query: q, direction: next ? 1 : -1)
+    }
+
+    func toggleBookmark() {
+        guard let p = activeTab?.currentPath, let store = bookmarkStore else { return }
+        if store.bookmarks.contains(where: { $0.path == p }) {
+            store.remove(path: p)
+        } else {
+            let title = tocTitleMap[p] ?? tocTitleMap[String(p.dropFirst())] ?? p
+            store.add(p, title: title)
+        }
+        bookmarks = store.bookmarks
+    }
+
+    func removeBookmark(id: UUID) {
+        bookmarkStore?.remove(id: id)
+        bookmarks = bookmarkStore?.bookmarks ?? []
+    }
+
+    // MARK: 冒烟状态机(统一驱动 NAV/SEARCH/FIND/HISTORY/TABS 链路)
+
+    fileprivate func tabDidFinish(_ tab: ReaderTab, textLen: Int) {
+        guard smoke else { return }
+        smokeStage += 1
+        let env = ProcessInfo.processInfo.environment
+
+        func fail(_ msg: String) -> Never {
+            print("SMOKE FAIL stage\(smokeStage) \(msg)")
+            exit(1)
+        }
+
+        switch smokeStage {
+        case 1:
+            guard textLen > 0 else { fail("textLen=\(textLen)") }
+            if let fq = env["CHIMERA_FIND"] {
+                findQuery = fq
+                findVisible = true
+                startFind()
+                return   // 结果由 findAction 订阅打印并退出
+            }
+            if let q = env["CHIMERA_SEARCH"], let idx = searchIndex {
+                let hits = idx.search(q)
+                print("SEARCH q=\(q) hits=\(hits.count) first=\(hits.first?.path ?? "-")")
+                guard let first = hits.first else {
+                    print("SMOKE OK search-nohits"); exit(0)
+                }
+                tab.pendingHighlight = q
+                tab.requestNav(first.path)
+                return
+            }
+            if let nav = env["CHIMERA_NAV"] {
+                print("SMOKE NAV(env) -> \(nav)")
+                tab.requestNav(nav)
+                return
+            }
+            print("SMOKE OK url=\(tab.currentPath ?? "-") textLen=\(textLen)")
+            exit(0)
+
+        case 2:
+            guard textLen > 0 else { fail("stage2 textLen=\(textLen)") }
+            if env["CHIMERA_TABS"] == "1" {
+                print("TAB1 second=\(tab.currentPath ?? "-")")
+                newTab()
+                return
+            }
+            if env["CHIMERA_HISTORY"] == "1" {
+                tab.goBack()
+                return
+            }
+            print("SMOKE OK url2=\(tab.currentPath ?? "-") textLen=\(textLen)")
+            exit(0)
+
+        case 3:
+            guard textLen > 0 else { fail("stage3 textLen=\(textLen)") }
+            if env["CHIMERA_TABS"] == "1" {
+                print("TAB2 home=\(tab.currentPath ?? "-")")
+                guard let first = tabs.first, first !== tab else { fail("tabs 状态异常") }
+                first.goBack()
+                return
+            }
+            if env["CHIMERA_HISTORY"] == "1" {
+                let homeOK = tab.currentPath == tab.document.homePath
+                print("HISTORY back=\(tab.currentPath ?? "-") homeOK=\(homeOK)")
+                exit(homeOK ? 0 : 1)
+            }
+            exit(0)
+
+        case 4:
+            // TABS 第 4 阶段:tab1 后退回默认页 → 两标签历史独立
+            let homeOK = tab.currentPath == tab.document.homePath
+            print("TABS tab1Back=\(tab.currentPath ?? "-") independent=\(homeOK) tabs=\(tabs.count)")
+            exit(homeOK && tabs.count == 2 ? 0 : 1)
+
+        default:
+            exit(0)
+        }
+    }
+
+    /// 从前 4KB 粗提 <meta charset=…>。
     static func charsetDeclared(in data: Data) -> String? {
         let head = String(decoding: data.prefix(4096), as: UTF8.self)
         guard let r = head.range(of: "charset=", options: .caseInsensitive) else { return nil }
@@ -266,89 +379,377 @@ final class AppModel: ObservableObject {
     }
 }
 
+// MARK: - 标签(每标签独立 webview/历史/导航)
+
+final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDelegate {
+    let id = UUID()
+    let document: AppModel.Document
+    let webView: WKWebView
+    weak var model: AppModel?
+
+    @Published var history = CHMHistory()
+    @Published var currentPath: String?
+    @Published var navigationRequest: AppModel.NavigationRequest?
+    /// 搜索跳转后待高亮的检索词
+    var pendingHighlight: String?
+
+    private var cancellables = Set<AnyCancellable>()
+
+    var title: String { model?.document?.url.lastPathComponent ?? "CHM" }
+
+    init(document: AppModel.Document, model: AppModel, loadPath: String?) {
+        self.document = document
+        self.model = model
+
+        let container = document.container
+        let config = WKWebViewConfiguration()
+        config.setURLSchemeHandler(CHMSchemeHandler(provider: { container }), forURLScheme: "chm")
+        webView = WKWebView(frame: .zero, configuration: config)
+
+        super.init()
+        webView.navigationDelegate = self
+
+        // 本标签导航请求
+        $navigationRequest
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] req in
+                guard let self, let req else { return }
+                self.load(path: req.path)
+            }
+            .store(in: &cancellables)
+
+        // 页内查找(仅作用于活动标签)
+        model.$findAction
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] act in
+                guard let self, let act,
+                      self.model?.activeTabID == self.id else { return }
+                self.webView.evaluateJavaScript(Self.findJS(act.query, direction: act.direction)) { result, _ in
+                    guard let status = result as? String else { return }
+                    model.findStatus = status
+                    if ProcessInfo.processInfo.environment["CHIMERA_SMOKE"] == "1",
+                       ProcessInfo.processInfo.environment["CHIMERA_FIND"] == act.query {
+                        print("FIND q=\(act.query) status=\(status)")
+                        exit(status.hasPrefix("0/") ? 1 : 0)
+                    }
+                }
+            }
+            .store(in: &cancellables)
+
+        load(path: loadPath ?? document.homePath)
+    }
+
+    func requestNav(_ local: String) {
+        guard !local.isEmpty else { return }
+        navigationRequest = AppModel.NavigationRequest(path: local)
+    }
+
+    func goBack() {
+        if let p = history.goBack() { requestNav(p) }
+    }
+
+    func goForward() {
+        if let p = history.goForward() { requestNav(p) }
+    }
+
+    private func load(path rawPath: String) {
+        let path = rawPath.hasPrefix("/") ? rawPath : "/" + rawPath
+        var comps = URLComponents()
+        comps.scheme = "chm"
+        comps.host = "doc"
+        comps.path = path
+        if let u = comps.url {
+            webView.load(URLRequest(url: u))
+        }
+    }
+
+    // MARK: WKNavigationDelegate
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        if let url = webView.url, url.scheme?.lowercased() == "chm" {
+            currentPath = url.path
+            history.push(url.path)
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        let smoke = ProcessInfo.processInfo.environment["CHIMERA_SMOKE"] == "1"
+        if let q = pendingHighlight {
+            pendingHighlight = nil
+            webView.evaluateJavaScript(Self.highlightJS(q)) { result, _ in
+                if smoke { print("HIGHLIGHT count=\((result as? Int) ?? 0)") }
+            }
+        }
+        if smoke {
+            webView.evaluateJavaScript("document.body ? document.body.innerText.length : -1") { r, _ in
+                self.model?.tabDidFinish(self, textLen: (r as? Int) ?? -1)
+            }
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        if ProcessInfo.processInfo.environment["CHIMERA_SMOKE"] == "1" {
+            print("SMOKE FAIL load: \(error)")
+            exit(1)
+        }
+    }
+
+    // MARK: 注入 JS
+
+    /// 命中词高亮:文本节点包裹 <mark> 并滚动到首个命中。
+    static func highlightJS(_ query: String) -> String {
+        let q = query
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+        return """
+        (function(){
+          var q='\(q)'; if(!q) return 0;
+          var count=0;
+          var walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
+          var nodes=[]; while(walker.nextNode()) nodes.push(walker.currentNode);
+          nodes.forEach(function(n){
+            var t=n.nodeValue; if(!t) return;
+            var lt=t.toLowerCase(); var i=lt.indexOf(q.toLowerCase()); if(i<0) return;
+            var frag=document.createDocumentFragment(); var pos=0;
+            while(i>=0){
+              frag.appendChild(document.createTextNode(t.slice(pos,i)));
+              var m=document.createElement('mark');
+              m.style.backgroundColor='#ffe066'; m.style.color='inherit';
+              m.textContent=t.substr(i,q.length);
+              frag.appendChild(m); count++;
+              pos=i+q.length; i=lt.indexOf(q.toLowerCase(),pos);
+            }
+            frag.appendChild(document.createTextNode(t.slice(pos)));
+            n.parentNode.replaceChild(frag,n);
+          });
+          var f=document.querySelector('mark');
+          if(f) f.scrollIntoView({block:'center'});
+          return count;
+        })()
+        """
+    }
+
+    /// 页内查找 JS:收集全部命中(span 包裹),游标循环,当前项橙色并滚动。
+    static func findJS(_ query: String, direction: Int) -> String {
+        let q = query
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+        return """
+        (function(){
+          var q='\(q)'; if(!q) return '0/0';
+          var dir=\(direction);
+          if(dir===0 || window.__chimeraFindQ!==q || !window.__chimeraMarks){
+            if(window.__chimeraMarks){
+              window.__chimeraMarks.forEach(function(m){
+                if(m.parentNode){ var p=m.parentNode; p.replaceChild(document.createTextNode(m.textContent),m); p.normalize(); }
+              });
+            }
+            window.__chimeraFindQ=q; window.__chimeraMarks=[]; window.__chimeraIdx=-1;
+            var ql=q.toLowerCase();
+            var walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
+            var nodes=[]; while(walker.nextNode()) nodes.push(walker.currentNode);
+            nodes.forEach(function(n){
+              var t=n.nodeValue; if(!t) return;
+              var lt=t.toLowerCase(); var i=lt.indexOf(ql); if(i<0) return;
+              var frag=document.createDocumentFragment(); var pos=0;
+              while(i>=0){
+                frag.appendChild(document.createTextNode(t.slice(pos,i)));
+                var m=document.createElement('span');
+                m.style.backgroundColor='#ffe066';
+                m.textContent=t.substr(i,q.length);
+                window.__chimeraMarks.push(m);
+                frag.appendChild(m);
+                pos=i+q.length; i=lt.indexOf(ql,pos);
+              }
+              frag.appendChild(document.createTextNode(t.slice(pos)));
+              n.parentNode.replaceChild(frag,n);
+            });
+          }
+          var marks=window.__chimeraMarks||[];
+          if(!marks.length) return '0/0';
+          if(window.__chimeraIdx>=0 && marks[window.__chimeraIdx])
+            marks[window.__chimeraIdx].style.backgroundColor='#ffe066';
+          window.__chimeraIdx += (dir===0 ? (window.__chimeraIdx<0?1:0) : dir);
+          if(window.__chimeraIdx>=marks.length) window.__chimeraIdx=0;
+          if(window.__chimeraIdx<0) window.__chimeraIdx=marks.length-1;
+          var m=marks[window.__chimeraIdx];
+          m.style.backgroundColor='#ff9500';
+          m.scrollIntoView({block:'center'});
+          return (window.__chimeraIdx+1)+'/'+marks.length;
+        })()
+        """
+    }
+}
+
 // MARK: - 视图
 
 struct ReaderView: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        NavigationSplitView {
-            SidebarView(model: model)
-                .navigationSplitViewColumnWidth(min: 180, ideal: 240, max: 460)
-        } detail: {
-            ZStack(alignment: .top) {
-                if let doc = model.document {
-                    WebView(document: doc, model: model).id(doc.id)
-                        .toolbar {
-                            ToolbarItemGroup(placement: .navigation) {
-                                Button { model.goBack() } label: {
-                                    Image(systemName: "chevron.backward")
-                                }
-                                .disabled(!model.canGoBack)
-                                .keyboardShortcut("[", modifiers: .command)
-                                Button { model.goForward() } label: {
-                                    Image(systemName: "chevron.forward")
-                                }
-                                .disabled(!model.canGoForward)
-                                .keyboardShortcut("]", modifiers: .command)
-                            }
-                            ToolbarItem(placement: .primaryAction) {
-                                Button { model.toggleBookmark() } label: {
-                                    Image(systemName: model.isCurrentPageBookmarked
-                                          ? "bookmark.fill" : "bookmark")
-                                }
-                                .disabled(model.currentPath == nil)
+        VStack(spacing: 0) {
+            if !model.tabs.isEmpty {
+                TabBar(model: model)
+            }
+            NavigationSplitView {
+                SidebarView(model: model)
+                    .navigationSplitViewColumnWidth(min: 180, ideal: 240, max: 460)
+            } detail: {
+                ZStack(alignment: .top) {
+                    if model.tabs.isEmpty {
+                        VStack(spacing: 14) {
+                            Image(systemName: "book")
+                                .font(.system(size: 56))
+                                .foregroundStyle(.secondary)
+                            Text(model.lastError ?? "打开一本 CHM 开始阅读")
+                                .font(.title3)
+                                .foregroundStyle(model.lastError == nil ? Color.secondary : Color.red)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 32)
+                            Button("打开…") { model.openPanel() }
+                                .keyboardShortcut("o", modifiers: .command)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        ZStack {
+                            ForEach(model.tabs) { tab in
+                                TabWebView(tab: tab)
+                                    .opacity(model.activeTabID == tab.id ? 1 : 0)
+                                    .allowsHitTesting(model.activeTabID == tab.id)
                             }
                         }
-                } else {
-                VStack(spacing: 14) {
-                    Image(systemName: "book")
-                        .font(.system(size: 56))
-                        .foregroundStyle(.secondary)
-                    Text(model.lastError ?? "打开一本 CHM 开始阅读")
-                        .font(.title3)
-                        .foregroundStyle(model.lastError == nil ? Color.secondary : Color.red)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 32)
-                    Button("打开…") { model.openPanel() }
-                        .keyboardShortcut("o", modifiers: .command)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-                if model.findVisible {
-                    FindBar(model: model)
+                        .toolbar {
+                            ToolbarItemGroup(placement: .navigation) {
+                                GoBackButton(model: model)
+                                GoForwardButton(model: model)
+                            }
+                            ToolbarItem(placement: .primaryAction) {
+                                BookmarkButton(model: model)
+                            }
+                        }
+                    }
+                    if model.findVisible {
+                        FindBar(model: model)
+                    }
                 }
             }
         }
     }
 }
 
-/// 页内查找覆盖条(Cmd+F 唤起)。
-struct FindBar: View {
+// MARK: 标签栏
+
+struct TabBar: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-            TextField("页内查找", text: $model.findQuery)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 200)
-                .onSubmit { model.triggerFind(next: true) }
-            Button { model.triggerFind(next: false) } label: { Image(systemName: "chevron.up") }
-                .buttonStyle(.borderless)
-            Button { model.triggerFind(next: true) } label: { Image(systemName: "chevron.down") }
-                .buttonStyle(.borderless)
-            Text(model.findStatus).font(.caption).foregroundStyle(.secondary).frame(width: 44)
-            Spacer()
-            Button { model.findVisible = false; model.findStatus = "" } label: {
-                Image(systemName: "xmark.circle.fill")
+        HStack(spacing: 4) {
+            ForEach(model.tabs) { tab in
+                TabBarItem(model: model, tab: tab)
             }
-            .buttonStyle(.borderless).foregroundStyle(.secondary)
+            Button { model.newTab() } label: { Image(systemName: "plus") }
+                .buttonStyle(.borderless)
+                .padding(.horizontal, 4)
+            Spacer()
         }
-        .padding(8)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
-        .padding(8)
+        .padding(.horizontal, 8)
+        .padding(.top, 6)
     }
+}
+
+struct TabBarItem: View {
+    @ObservedObject var model: AppModel
+    @ObservedObject var tab: ReaderTab
+
+    private var active: Bool { model.activeTabID == tab.id }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "book")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(tab.title)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 150)
+            Button {
+                model.closeTab(id: tab.id)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption2)
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(
+            active ? Color(nsColor: .controlBackgroundColor) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 6)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(active ? Color(nsColor: .controlColor) : Color.clear,
+                              lineWidth: 0.8)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture { model.activeTabID = tab.id }
+    }
+}
+
+// MARK: 工具栏按钮(观察活动标签以驱动禁用态)
+
+private struct GoBackButton: View {
+    @ObservedObject var model: AppModel
+    var body: some View {
+        ObservedTabButton(model: model) { tab in
+            Button { tab.goBack() } label: { Image(systemName: "chevron.backward") }
+                .disabled(!tab.history.canGoBack)
+                .keyboardShortcut("[", modifiers: .command)
+        }
+    }
+}
+
+private struct GoForwardButton: View {
+    @ObservedObject var model: AppModel
+    var body: some View {
+        ObservedTabButton(model: model) { tab in
+            Button { tab.goForward() } label: { Image(systemName: "chevron.forward") }
+                .disabled(!tab.history.canGoForward)
+                .keyboardShortcut("]", modifiers: .command)
+        }
+    }
+}
+
+private struct BookmarkButton: View {
+    @ObservedObject var model: AppModel
+    var body: some View {
+        ObservedTabButton(model: model) { tab in
+            Button { model.toggleBookmark() } label: {
+                Image(systemName: model.isCurrentPageBookmarked ? "bookmark.fill" : "bookmark")
+            }
+            .disabled(tab.currentPath == nil)
+        }
+    }
+}
+
+/// 包装:让工具栏子视图观察当前活动标签(历史/路径变化驱动 UI)。
+private struct ObservedTabButton<Content: View>: View {
+    @ObservedObject var model: AppModel
+    @ViewBuilder var content: (ReaderTab) -> Content
+
+    var body: some View {
+        if let tab = model.activeTab {
+            TabObserver(tab: tab, content: content)
+        }
+    }
+}
+
+private struct TabObserver<Content: View>: View {
+    @ObservedObject var tab: ReaderTab
+    @ViewBuilder var content: (ReaderTab) -> Content
+
+    var body: some View { content(tab) }
 }
 
 // MARK: - 侧栏
@@ -382,9 +783,33 @@ struct SidebarView: View {
                 if let toc = model.document?.toc {
                     let tree = toc.map(TOCTreeNode.init)
                     List(tree, children: \.children) { node in
-                        TOCRow(item: node.item) { model.navigate(to: $0) }
+                        TOCRow(item: node.item, onOpen: { model.navigate(to: $0) }) {
+                            model.openInNewTab($0)
+                        }
                     }
                     .listStyle(.sidebar)
+                }
+            case .marks:
+                Group {
+                    if model.bookmarks.isEmpty {
+                        Text("暂无书签(工具栏 ⚑ 添加)")
+                            .foregroundStyle(.secondary).font(.caption).padding()
+                    } else {
+                        List(model.bookmarks) { bm in
+                            HStack {
+                                Image(systemName: "bookmark.fill")
+                                    .foregroundStyle(.yellow).font(.caption)
+                                Text(bm.title).lineLimit(1)
+                                Spacer()
+                                Button { model.removeBookmark(id: bm.id) } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                }
+                                .buttonStyle(.borderless).foregroundStyle(.secondary)
+                            }
+                            .contentShape(Rectangle())
+                            .onTapGesture { model.navigate(to: bm.path) }
+                        }
+                    }
                 }
             case .search:
                 VStack(spacing: 4) {
@@ -424,7 +849,7 @@ struct SidebarView: View {
                     } else {
                         List(model.searchHits, id: \.path) { hit in
                             Button {
-                                model.pendingHighlight = model.searchQuery
+                                model.activeTab?.pendingHighlight = model.searchQuery
                                 model.navigate(to: hit.path)
                             } label: {
                                 VStack(alignment: .leading, spacing: 2) {
@@ -437,28 +862,6 @@ struct SidebarView: View {
                                 .padding(.vertical, 2)
                             }
                             .buttonStyle(.plain)
-                        }
-                    }
-                }
-            case .marks:
-                Group {
-                    if model.bookmarks.isEmpty {
-                        Text("暂无书签(工具栏 ⚑ 添加)")
-                            .foregroundStyle(.secondary).font(.caption).padding()
-                    } else {
-                        List(model.bookmarks) { bm in
-                            HStack {
-                                Image(systemName: "bookmark.fill")
-                                    .foregroundStyle(.yellow).font(.caption)
-                                Text(bm.title).lineLimit(1)
-                                Spacer()
-                                Button { model.removeBookmark(id: bm.id) } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                }
-                                .buttonStyle(.borderless).foregroundStyle(.secondary)
-                            }
-                            .contentShape(Rectangle())
-                            .onTapGesture { model.navigate(to: bm.path) }
                         }
                     }
                 }
@@ -512,6 +915,7 @@ struct TOCTreeNode: Identifiable {
 struct TOCRow: View {
     let item: CHMTocItem
     let onOpen: (String) -> Void
+    var onOpenInTab: ((String) -> Void)? = nil
 
     var body: some View {
         HStack(spacing: 6) {
@@ -526,283 +930,46 @@ struct TOCRow: View {
         .onTapGesture {
             if let local = item.local { onOpen(local) }
         }
+        .contextMenu {
+            if let local = item.local, let onOpenInTab {
+                Button("在新标签页打开") { onOpenInTab(local) }
+            }
+        }
     }
 }
 
-struct WebView: NSViewRepresentable {
-    let document: AppModel.Document
-    let model: AppModel
+/// 页内查找覆盖条(Cmd+F 唤起)。
+struct FindBar: View {
+    @ObservedObject var model: AppModel
 
-    func makeCoordinator() -> Coordinator { Coordinator(model: model) }
-
-    func makeNSView(context: Context) -> WKWebView {
-        let config = WKWebViewConfiguration()
-        config.setURLSchemeHandler(
-            CHMSchemeHandler(provider: { [weak model] in model?.document?.container }),
-            forURLScheme: "chm"
-        )
-        let wv = WKWebView(frame: .zero, configuration: config)
-        context.coordinator.webView = wv
-        wv.navigationDelegate = context.coordinator
-        load(document, into: wv, coordinator: context.coordinator)
-        return wv
-    }
-
-    func updateNSView(_ wv: WKWebView, context: Context) {
-        // 导航与页内查找已由 Coordinator 的 Combine 订阅驱动(updateNSView 不可靠)
-        if context.coordinator.loadedDocumentID != document.id {
-            load(document, into: wv, coordinator: context.coordinator)
-        }
-    }
-
-    private func load(_ doc: AppModel.Document, into wv: WKWebView, coordinator: Coordinator) {
-        coordinator.loadedDocumentID = doc.id
-        var comps = URLComponents()
-        comps.scheme = "chm"
-        comps.host = "doc"
-        comps.path = doc.homePath
-        if let url = comps.url {
-            wv.load(URLRequest(url: url))
-        }
-    }
-
-    /// 页内查找 JS:收集全部命中(span 包裹),游标循环,当前项橙色并滚动。
-    static func findJS(_ query: String, direction: Int) -> String {
-        let q = query
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "'", with: "\\'")
-        return """
-        (function(){
-          var q='\(q)'; if(!q) return '0/0';
-          var dir=\(direction);
-          if(dir===0 || window.__chimeraFindQ!==q || !window.__chimeraMarks){
-            if(window.__chimeraMarks){
-              window.__chimeraMarks.forEach(function(m){
-                if(m.parentNode){ var p=m.parentNode; p.replaceChild(document.createTextNode(m.textContent),m); p.normalize(); }
-              });
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("页内查找", text: $model.findQuery)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 200)
+                .onSubmit { model.triggerFind(next: true) }
+            Button { model.triggerFind(next: false) } label: { Image(systemName: "chevron.up") }
+                .buttonStyle(.borderless)
+            Button { model.triggerFind(next: true) } label: { Image(systemName: "chevron.down") }
+                .buttonStyle(.borderless)
+            Text(model.findStatus).font(.caption).foregroundStyle(.secondary).frame(width: 44)
+            Spacer()
+            Button { model.findVisible = false; model.findStatus = "" } label: {
+                Image(systemName: "xmark.circle.fill")
             }
-            window.__chimeraFindQ=q; window.__chimeraMarks=[]; window.__chimeraIdx=-1;
-            var ql=q.toLowerCase();
-            var walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
-            var nodes=[]; while(walker.nextNode()) nodes.push(walker.currentNode);
-            nodes.forEach(function(n){
-              var t=n.nodeValue; if(!t) return;
-              var lt=t.toLowerCase(); var i=lt.indexOf(ql); if(i<0) return;
-              var frag=document.createDocumentFragment(); var pos=0;
-              while(i>=0){
-                frag.appendChild(document.createTextNode(t.slice(pos,i)));
-                var m=document.createElement('span');
-                m.style.backgroundColor='#ffe066';
-                m.textContent=t.substr(i,q.length);
-                window.__chimeraMarks.push(m);
-                frag.appendChild(m);
-                pos=i+q.length; i=lt.indexOf(ql,pos);
-              }
-              frag.appendChild(document.createTextNode(t.slice(pos)));
-              n.parentNode.replaceChild(frag,n);
-            });
-          }
-          var marks=window.__chimeraMarks||[];
-          if(!marks.length) return '0/0';
-          if(window.__chimeraIdx>=0 && marks[window.__chimeraIdx])
-            marks[window.__chimeraIdx].style.backgroundColor='#ffe066';
-          window.__chimeraIdx += (dir===0 ? (window.__chimeraIdx<0?1:0) : dir);
-          if(window.__chimeraIdx>=marks.length) window.__chimeraIdx=0;
-          if(window.__chimeraIdx<0) window.__chimeraIdx=marks.length-1;
-          var m=marks[window.__chimeraIdx];
-          m.style.backgroundColor='#ff9500';
-          m.scrollIntoView({block:'center'});
-          return (window.__chimeraIdx+1)+'/'+marks.length;
-        })()
-        """
+            .buttonStyle(.borderless).foregroundStyle(.secondary)
+        }
+        .padding(8)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .padding(8)
     }
+}
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
-        let model: AppModel
-        weak var webView: WKWebView?
-        var loadedDocumentID: UUID?
-        var handledRequestID: UUID?
-        var handledFindID: UUID?
-        private var smokeStage = 0
-        private var cancellables = Set<AnyCancellable>()
+/// 标签内容:直接挂载该标签自持有的 WKWebView。
+struct TabWebView: NSViewRepresentable {
+    @ObservedObject var tab: ReaderTab
 
-        init(model: AppModel) {
-            self.model = model
-            super.init()
-            // 页内查找经 Combine 驱动:不依赖 SwiftUI 对 representable 的差异比对
-            model.$findAction
-                .receive(on: DispatchQueue.main)
-                .sink { [weak self] act in
-                    guard let self, let act, self.handledFindID != act.id,
-                          let wv = self.webView else { return }
-                    self.handledFindID = act.id
-                    wv.evaluateJavaScript(
-                        WebView.findJS(act.query, direction: act.direction)
-                    ) { result, _ in
-                        guard let status = result as? String else { return }
-                        model.findStatus = status
-                        if ProcessInfo.processInfo.environment["CHIMERA_SMOKE"] == "1",
-                           ProcessInfo.processInfo.environment["CHIMERA_FIND"] == act.query {
-                            print("FIND q=\(act.query) status=\(status)")
-                            exit(status.hasPrefix("0/") ? 1 : 0)
-                        }
-                    }
-                }
-                .store(in: &cancellables)
-
-            // 所有导航经 Combine 驱动(updateNSView 差异比对不可靠)
-            model.$navigationRequest
-                .receive(on: DispatchQueue.main)
-                .sink { [weak self] req in
-                    guard let self, let req, self.handledRequestID != req.id,
-                          let wv = self.webView else { return }
-                    self.handledRequestID = req.id
-                    let path = req.path.hasPrefix("/") ? req.path : "/" + req.path
-                    var comps = URLComponents()
-                    comps.scheme = "chm"
-                    comps.host = "doc"
-                    comps.path = path
-                    if let u = comps.url {
-                        wv.load(URLRequest(url: u))
-                    }
-                }
-                .store(in: &cancellables)
-        }
-
-        /// 命中词高亮 JS:文本节点包裹 <mark> 并滚动到首个命中。
-        static func highlightJS(_ query: String) -> String {
-            let q = query
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "'", with: "\\'")
-            return """
-            (function(){
-              var q='\(q)'; if(!q) return 0;
-              var count=0;
-              var walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
-              var nodes=[]; while(walker.nextNode()) nodes.push(walker.currentNode);
-              var ql=q.toLowerCase();
-              nodes.forEach(function(n){
-                var t=n.nodeValue; if(!t) return;
-                var lt=t.toLowerCase(); var i=lt.indexOf(ql); if(i<0) return;
-                var frag=document.createDocumentFragment(); var pos=0;
-                while(i>=0){
-                  frag.appendChild(document.createTextNode(t.slice(pos,i)));
-                  var m=document.createElement('mark');
-                  m.style.backgroundColor='#ffe066'; m.style.color='inherit';
-                  m.textContent=t.substr(i,q.length);
-                  frag.appendChild(m); count++;
-                  pos=i+q.length; i=lt.indexOf(ql,pos);
-                }
-                frag.appendChild(document.createTextNode(t.slice(pos)));
-                n.parentNode.replaceChild(frag,n);
-              });
-              var f=document.querySelector('mark');
-              if(f) f.scrollIntoView({block:'center'});
-              return count;
-            })()
-            """
-        }
-
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            // 搜索跳转后的命中词高亮(正常使用与冒烟共用)
-            if let q = model.pendingHighlight {
-                model.pendingHighlight = nil
-                webView.evaluateJavaScript(Self.highlightJS(q)) { result, _ in
-                    if ProcessInfo.processInfo.environment["CHIMERA_SMOKE"] == "1" {
-                        print("HIGHLIGHT count=\((result as? Int) ?? 0)")
-                    }
-                }
-            }
-            // 冒烟验收(两阶段):①默认页渲染且正文非空 ②搜索/链接导航后再渲染
-            guard ProcessInfo.processInfo.environment["CHIMERA_SMOKE"] == "1" else { return }
-            smokeStage += 1
-            webView.evaluateJavaScript(
-                "document.body ? document.body.innerText.length : -1"
-            ) { result, _ in
-                let len = (result as? Int) ?? -1
-                guard len > 0 else {
-                    print("SMOKE FAIL stage\(self.smokeStage) textLen=\(len)")
-                    exit(1)
-                }
-                if self.smokeStage == 1 {
-                    // 页内查找链路:CHIMERA_FIND=关键词(结果经 updateNSView 回调打印并退出)
-                    if let fq = ProcessInfo.processInfo.environment["CHIMERA_FIND"] {
-                        self.model.findQuery = fq
-                        self.model.findVisible = true
-                        self.model.startFind()
-                        return
-                    }
-                    // 搜索链路:CHIMERA_SEARCH=关键词
-                    if let q = ProcessInfo.processInfo.environment["CHIMERA_SEARCH"],
-                       let idx = self.model.searchIndex {
-                        let hits = idx.search(q)
-                        print("SEARCH q=\(q) hits=\(hits.count) first=\(hits.first?.path ?? "-")")
-                        if let first = hits.first {
-                            self.model.pendingHighlight = q
-                            var comps = URLComponents()
-                            comps.scheme = "chm"
-                            comps.host = "doc"
-                            comps.path = first.path.hasPrefix("/") ? first.path : "/" + first.path
-                            if let u = comps.url {
-                                webView.load(URLRequest(url: u))
-                            }
-                            return
-                        }
-                        print("SMOKE OK search-nohits")
-                        exit(0)
-                    }
-                    webView.evaluateJavaScript(
-                        "(function(){var a=document.querySelector('a[href]'); return a ? a.href : ''})()"
-                    ) { href, _ in
-                        if let h = href as? String, let u = URL(string: h),
-                           u.scheme?.lowercased() == "chm" {
-                            print("SMOKE NAV -> \(h)")
-                            webView.load(URLRequest(url: u))
-                        } else if let nav = ProcessInfo.processInfo.environment["CHIMERA_NAV"] {
-                            var comps = URLComponents()
-                            comps.scheme = "chm"
-                            comps.host = "doc"
-                            comps.path = nav.hasPrefix("/") ? nav : "/" + nav
-                            if let u = comps.url {
-                                print("SMOKE NAV(env) -> \(nav)")
-                                webView.load(URLRequest(url: u))
-                            } else {
-                                print("SMOKE OK url=\(webView.url?.absoluteString ?? "-") textLen=\(len) nolink")
-                                exit(0)
-                            }
-                        } else {
-                            print("SMOKE OK url=\(webView.url?.absoluteString ?? "-") textLen=\(len) nolink")
-                            exit(0)
-                        }
-                    }
-                } else if self.smokeStage == 2,
-                          ProcessInfo.processInfo.environment["CHIMERA_HISTORY"] == "1" {
-                    // 历史链路:第二页后回退,第三阶段校验回到默认页
-                    self.model.goBack()
-                } else {
-                    if ProcessInfo.processInfo.environment["CHIMERA_HISTORY"] == "1",
-                       self.smokeStage >= 3 {
-                        let homeOK = webView.url?.path == self.model.document?.homePath
-                        print("HISTORY back=\(webView.url?.path ?? "-") homeOK=\(homeOK)")
-                        exit(homeOK ? 0 : 1)
-                    }
-                    print("SMOKE OK url2=\(webView.url?.absoluteString ?? "-") textLen=\(len)")
-                    exit(0)
-                }
-            }
-        }
-
-        func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-            if let url = webView.url, url.scheme?.lowercased() == "chm" {
-                model.pageDidCommit(path: url.path)
-            }
-        }
-
-        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-            if ProcessInfo.processInfo.environment["CHIMERA_SMOKE"] == "1" {
-                print("SMOKE FAIL load: \(error)")
-                exit(1)
-            }
-        }
-    }
+    func makeNSView(context: Context) -> WKWebView { tab.webView }
+    func updateNSView(_ wv: WKWebView, context: Context) {}
 }
