@@ -37,3 +37,16 @@ swift test -Xswiftc -plugin-path \
 
 - 判断测试是否真正运行,输出必须包含 `Test run started` / `✔ ... passed`,不能只看退出码。
 - 未来若安装完整 Xcode,可直接 `swift test`,无需上述旗标。
+
+## 本地化(CLT 手工管线)
+
+- 开发语言 = 简体中文(`defaultLocalization: "zh-Hans"`,Info.plist `CFBundleDevelopmentRegion=zh-Hans`),
+  UI 字符串字面量本身即 localization key;翻译在 `Sources/ChimeraGUI/Resources/{en,zh-Hans}.lproj/`。
+- SPM 将资源打进 `Chimera_ChimeraGUI.bundle`,但 SwiftUI `Text("key")`/`String(localized:)`
+  **只查 main bundle**——裸二进制(.build/debug/ChimeraApp)main bundle 无资源,
+  自动回退显示 key(即中文),冒烟/debug 不回归;.app 由 make-app.sh 把
+  bundle 内 `.lproj` 平铺进 `Contents/Resources/`(嵌套 .bundle 不会被命中)。
+- 三元/变量字符串(如 `Text(cond ? "a" : "b")`、`Text(stringVar)`)不走本地化,
+  须拆成字面量分支或显式 `LocalizedStringKey(...)`。
+- 打包后自检:`CHIMERA_L10N_PROBE=1 Chimera.app/Contents/MacOS/Chimera -AppleLanguages "(en)"`
+  (注意必须数组语法,裸 `-AppleLanguages en` 无效)打印关键键的解析结果。

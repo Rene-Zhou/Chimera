@@ -18,6 +18,10 @@
     <string>Chimera</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh-Hans</string>
+    <key>CFBundleAllowMixedLocalizations</key>
+    <true/>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>

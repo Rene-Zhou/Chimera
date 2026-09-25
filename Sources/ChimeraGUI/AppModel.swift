@@ -189,8 +189,8 @@ final class AppModel: ObservableObject {
 
     func openPanel() {
         let panel = NSOpenPanel()
-        panel.title = "打开 CHM 文件"
-        panel.message = "选择一本 CHM 电子书"
+        panel.title = String(localized: "打开 CHM 文件")
+        panel.message = String(localized: "选择一本 CHM 电子书")
         if let chmType = UTType(filenameExtension: "chm") {
             panel.allowedContentTypes = [chmType]
         }
@@ -220,7 +220,7 @@ final class AppModel: ObservableObject {
             let container = try CHMContainer(path: url.path)
             let info = try container.systemInfo()
             guard let topic = info?.defaultTopic, !topic.isEmpty else {
-                throw CHMError.invalidFormat("缺少默认页(#SYSTEM code 2)")
+                throw CHMError.invalidFormat(String(localized: "缺少默认页(#SYSTEM code 2)"))
             }
             let homePath = topic.hasPrefix("/") ? topic : "/" + topic
 

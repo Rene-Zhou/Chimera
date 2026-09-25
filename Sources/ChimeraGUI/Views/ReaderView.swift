@@ -24,11 +24,19 @@ struct ReaderView: View {
                             Image(systemName: "book")
                                 .font(.system(size: 56))
                                 .foregroundStyle(.secondary)
-                            Text(model.lastError ?? "打开一本 CHM 开始阅读")
-                                .font(.title3)
-                                .foregroundStyle(model.lastError == nil ? Color.secondary : Color.red)
-                                .multilineTextAlignment(.center)
-                                .padding(.horizontal, 32)
+                            if let error = model.lastError {
+                                Text(error)
+                                    .font(.title3)
+                                    .foregroundStyle(Color.red)
+                                    .multilineTextAlignment(.center)
+                                    .padding(.horizontal, 32)
+                            } else {
+                                Text("打开一本 CHM 开始阅读")
+                                    .font(.title3)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                                    .padding(.horizontal, 32)
+                            }
                             Button("打开…") { model.openPanel() }
                                 .keyboardShortcut("o", modifiers: .command)
                         }
@@ -95,7 +103,8 @@ struct SettingsPanel: View {
                 set: { model.updateSettings(font: $0) }
             )) {
                 ForEach(fonts, id: \.0) { name, value in
-                    Text(name).tag(value)
+                    // 经 LocalizedStringKey 显式查表:"默认(系统)"有翻译,字体名无对应键则原样显示
+                    Text(LocalizedStringKey(name)).tag(value)
                 }
             }
             .pickerStyle(.radioGroup)

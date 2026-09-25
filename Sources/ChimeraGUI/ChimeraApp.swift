@@ -7,6 +7,22 @@ struct ChimeraApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var model = AppModel()
 
+    init() {
+        // 本地化探针:CHIMERA_L10N_PROBE=1 时打印 main bundle 对关键键的解析结果并退出,
+        // 供打包后验证 .app 内 Localizable.strings 查找链路(scripts/make-app.sh 配套)。
+        if ProcessInfo.processInfo.environment["CHIMERA_L10N_PROBE"] == "1" {
+            print("L10N bundle=\(Bundle.main.bundlePath)")
+            print("L10N localizations=\(Bundle.main.localizations)")
+            print("L10N preferredLanguages=\(Locale.preferredLanguages)")
+            print("L10N open=\(String(localized: "打开…"))")
+            print("L10N settings=\(String(localized: "显示设置…"))")
+            print("L10N toc=\(String(localized: "目录"))")
+            print("L10N empty=\(String(localized: "打开一本 CHM 开始阅读"))")
+            print("L10N fontsize=\(String(localized: "字号 %lld px"))")
+            exit(0)
+        }
+    }
+
     var body: some Scene {
         // 单窗口场景:Window 只允许一个实例。运行中再次 open -a / Finder 双击
         // 不会再开新窗口,而是由 AppDelegate 把文件路由进既有窗口(AppModel.shared)。

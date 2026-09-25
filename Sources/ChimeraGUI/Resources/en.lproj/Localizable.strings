@@ -1,0 +1,46 @@
+/* Chimera English localization (keys are the zh-Hans development-language strings) */
+
+/* Menu commands */
+"打开…" = "Open…";
+"新建标签页" = "New Tab";
+"关闭标签页" = "Close Tab";
+"放大" = "Zoom In";
+"缩小" = "Zoom Out";
+"实际大小" = "Actual Size";
+"显示设置…" = "Settings…";
+"最近打开" = "Recent";
+"页内查找…" = "Find on Page…";
+
+/* Empty state */
+"打开一本 CHM 开始阅读" = "Open a CHM Book to Start Reading";
+
+/* Display settings panel */
+"显示设置" = "Display Settings";
+"默认(系统)" = "Default (System)";
+"字体" = "Font";
+"字号 %lld px" = "Font Size %lld px";
+"完成" = "Done";
+
+/* Find bar */
+"页内查找" = "Find on Page";
+
+/* Sidebar */
+"侧栏" = "Sidebar";
+"目录" = "Table of Contents";
+"索引" = "Index";
+"搜索" = "Search";
+"书签" = "Bookmarks";
+"暂无书签(工具栏 ⚑ 添加)" = "No bookmarks yet (add via the ⚑ button in the toolbar)";
+"搜索全书…" = "Search Entire Book…";
+"建立索引…" = "Building Index…";
+"输入关键词回车搜索全书" = "Type a keyword and press Return to search";
+"无命中" = "No Results";
+"共 %lld 条命中,仅显示前 %lld 条" = "%lld results; showing the first %lld";
+"过滤索引…" = "Filter Index…";
+"无索引项" = "No Index Entries";
+"在新标签页打开" = "Open in New Tab";
+
+/* Open panel and error messages */
+"打开 CHM 文件" = "Open CHM File";
+"选择一本 CHM 电子书" = "Choose a CHM eBook";
+"缺少默认页(#SYSTEM code 2)" = "Missing default page (#SYSTEM code 2)";

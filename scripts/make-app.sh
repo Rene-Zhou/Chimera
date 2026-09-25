@@ -39,6 +39,15 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/ChimeraApp "$APP/Contents/MacOS/Chimera"
 cp scripts/AppResources/Info.plist "$APP/Contents/Info.plist"
 cp "$DIST/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+# 本地化:SPM 资源 bundle 的 .lproj 平铺进 main bundle Resources——
+# SwiftUI Text("key")/String(localized:) 只在 main bundle 查 Localizable.strings,
+# 嵌套的 .bundle 不会被自动命中,故不拷 bundle 本体
+RB=.build/release/Chimera_ChimeraGUI.bundle
+if [ -d "$RB/Contents/Resources" ]; then
+  cp -R "$RB/Contents/Resources/"*.lproj "$APP/Contents/Resources/"
+else
+  echo "警告: 未找到 SPM 资源 bundle ($RB),.app 将缺失本地化资源" >&2
+fi
 touch "$APP"
 codesign --force --sign - "$APP" >/dev/null 2>&1 || true
 

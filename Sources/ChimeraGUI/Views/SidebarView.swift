@@ -96,10 +96,16 @@ struct SidebarView: View {
                         }
                         .padding(.vertical, 6)
                     } else if model.searchHits.isEmpty {
-                        Text(model.searchQuery.isEmpty ? "输入关键词回车搜索全书" : "无命中")
-                            .foregroundStyle(.secondary)
-                            .font(.caption)
-                            .padding()
+                        Group {
+                            if model.searchQuery.isEmpty {
+                                Text("输入关键词回车搜索全书")
+                            } else {
+                                Text("无命中")
+                            }
+                        }
+                        .foregroundStyle(.secondary)
+                        .font(.caption)
+                        .padding()
                     } else {
                         if model.searchTotal > model.searchHits.count {
                             Text("共 \(model.searchTotal) 条命中,仅显示前 \(model.searchHits.count) 条")

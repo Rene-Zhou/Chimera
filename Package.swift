@@ -3,6 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "Chimera",
+    defaultLocalization: "zh-Hans",
     platforms: [
         .macOS(.v14)
     ],
@@ -30,6 +31,9 @@ let package = Package(
         .executableTarget(
             name: "ChimeraGUI",
             dependencies: ["ChimeraCore"],
+            // 本地化资源(en/zh-Hans 的 Localizable.strings 与 InfoPlist.strings);
+            // 打包时由 scripts/make-app.sh 把 .lproj 平铺进 .app main bundle
+            resources: [.process("Resources")],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
