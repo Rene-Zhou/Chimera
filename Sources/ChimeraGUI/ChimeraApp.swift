@@ -7,6 +7,7 @@ import ChimeraCore
 
 @main
 struct ChimeraApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var model = AppModel()
 
     var body: some Scene {
@@ -52,6 +53,16 @@ struct ChimeraApp: App {
 }
 
 // MARK: - 文档模型
+
+/// Finder 双击/拖到 Dock 图标时经打开事件进入。
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for u in urls where u.pathExtension.lowercased() == "chm" {
+            AppModel.shared?.open(url: u)
+            return
+        }
+    }
+}
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -122,7 +133,11 @@ final class AppModel: ObservableObject {
     private var smokeStage = 0
     private var smoke: Bool { ProcessInfo.processInfo.environment["CHIMERA_SMOKE"] == "1" }
 
+    /// 供 AppDelegate 打开事件路由(Finder 双击 .chm / Dock 拖放)
+    static weak var shared: AppModel?
+
     init() {
+        Self.shared = self
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Chimera", isDirectory: true)
         settingsStore = CHMSettingsStore(storageURL: dir.appendingPathComponent("Settings.json"))
@@ -723,6 +738,19 @@ struct ReaderView: View {
             }
         }
         .sheet(isPresented: $model.settingsVisible) { SettingsPanel(model: model) }
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            guard let p = providers.first(where: {
+                $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
+            }) else { return false }
+            _ = p.loadObject(ofClass: URL.self) { url, _ in
+                DispatchQueue.main.async {
+                    if let url, url.pathExtension.lowercased() == "chm" {
+                        model.open(url: url)
+                    }
+                }
+            }
+            return true
+        }
     }
 }
 
