@@ -53,22 +53,26 @@ struct SidebarView: View {
                     } else {
                         List(model.bookmarks) { bm in
                             HStack {
-                                Image(systemName: "bookmark.fill")
-                                    .foregroundStyle(.yellow).font(.caption)
-                                Text(bm.title).lineLimit(1)
-                                Spacer()
+                                Button {
+                                    if NSEvent.modifierFlags.contains(.command) {
+                                        model.openInNewTab(bm.path)
+                                    } else {
+                                        model.navigate(to: bm.path)
+                                    }
+                                } label: {
+                                    HStack {
+                                        Image(systemName: "bookmark.fill")
+                                            .foregroundStyle(.yellow).font(.caption)
+                                        Text(bm.title).lineLimit(1)
+                                        Spacer()
+                                    }
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain).foregroundStyle(.primary)
                                 Button { model.removeBookmark(id: bm.id) } label: {
                                     Image(systemName: "xmark.circle.fill")
                                 }
                                 .buttonStyle(.borderless).foregroundStyle(.secondary)
-                            }
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                if NSEvent.modifierFlags.contains(.command) {
-                                    model.openInNewTab(bm.path)
-                                } else {
-                                    model.navigate(to: bm.path)
-                                }
                             }
                         }
                     }
@@ -219,7 +223,6 @@ struct TOCNodeView: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 4) {
                 if node.children != nil {
-                    // 用 Button 而非 Image+手势:保证命中优先级高于整行点按,且有 AXPress
                     Button { model.toggleTOCExpanded(node.id) } label: {
                         Image(systemName: expanded ? "chevron.down" : "chevron.right")
                             .font(.caption2)
@@ -231,22 +234,29 @@ struct TOCNodeView: View {
                 } else {
                     Spacer().frame(width: 14)
                 }
-                Text(node.item.title)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Spacer(minLength: 0)
+                // 行本体用 Button 而非 onTapGesture:窗口未激活时
+                // onTapGesture 的首次点击会被窗口激活吞掉,Button 可点击穿透
+                Button {
+                    if let local = node.item.local {
+                        open(local)
+                    } else if node.children != nil {
+                        // 纯文件夹节点:点标题只切换展开
+                        model.toggleTOCExpanded(node.id)
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(node.item.title)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Spacer(minLength: 0)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.primary)
             }
             .padding(.leading, CGFloat(depth) * 14)
             .padding(.vertical, 2)
-            .contentShape(Rectangle())
-            .onTapGesture {
-                if let local = node.item.local {
-                    open(local)
-                } else if node.children != nil {
-                    // 纯文件夹节点:点标题只切换展开
-                    model.toggleTOCExpanded(node.id)
-                }
-            }
             .contextMenu {
                 if let local = node.item.local {
                     Button("在新标签页打开") { model.openInNewTab(local) }

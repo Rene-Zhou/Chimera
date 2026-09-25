@@ -6,7 +6,17 @@ import ChimeraCore
 
 // MARK: - 标签(每标签独立 webview/历史/导航)
 
-final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDelegate {
+/// WKUserContentController.add 会强引用 handler,用弱代理避免 ReaderTab 循环引用。
+private final class WeakMessageProxy: NSObject, WKScriptMessageHandler {
+    weak var target: WKScriptMessageHandler?
+    init(_ target: WKScriptMessageHandler) { self.target = target }
+    func userContentController(_ ucc: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        target?.userContentController(ucc, didReceive: message)
+    }
+}
+
+final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDelegate, WKScriptMessageHandler {
     let id = UUID()
     let document: AppModel.Document
     let webView: WKWebView
@@ -34,9 +44,28 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
         if let rules = Self.offlineRuleList() {
             config.userContentController.add(rules)
         }
+        // ⌘+点击页内链接 = 新标签页:JS 捕获 metaKey 点击并回传(捕获阶段+preventDefault,
+        // 比 WKNavigationAction.modifierFlags 可靠;后者留作兜底)
+        config.userContentController.addUserScript(WKUserScript(
+            source: """
+            document.addEventListener('click', function(e){
+              if (!e.metaKey) return;
+              var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+              if (!a) return;
+              e.preventDefault(); e.stopPropagation();
+              window.webkit.messageHandlers.chimeraCmdClick.postMessage(a.href);
+            }, true);
+            """,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
         webView = WKWebView(frame: .zero, configuration: config)
 
         super.init()
+        // handler 须在 super.init 之后注册(要用 self);同一 userContentController
+        // 实例被 webView 持有,创建后追加 handler 是合法的
+        webView.configuration.userContentController.add(
+            WeakMessageProxy(self), name: "chimeraCmdClick")
         webView.navigationDelegate = self
 
         // 本标签导航请求
@@ -116,6 +145,17 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
         if let u = comps.url {
             webView.load(URLRequest(url: u))
         }
+    }
+
+    // MARK: WKScriptMessageHandler(⌘+点击回传)
+
+    func userContentController(_ ucc: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        guard message.name == "chimeraCmdClick",
+              let s = message.body as? String,
+              let url = URL(string: s),
+              url.scheme?.lowercased() == "chm" else { return }
+        model?.openInNewTab(url.path)
     }
 
     // MARK: WKNavigationDelegate
