@@ -191,7 +191,8 @@ public enum CHMSitemapParser {
     }
 
     /// 最小 HTML 实体解码:十进制/十六进制数字实体 + 常用具名实体。
-    private static func decodeEntities(_ s: String) -> String {
+    /// (internal:CHMTextExtractor 复用)
+    static func decodeEntities(_ s: String) -> String {
         guard s.contains("&") else { return s }
         let named = ["amp": "&", "lt": "<", "gt": ">", "quot": "\"", "apos": "'", "nbsp": "\u{00A0}"]
         var out = ""
@@ -200,7 +201,7 @@ public enum CHMSitemapParser {
         while i < s.endIndex {
             if s[i] == "&",
                let semi = s[i...].firstIndex(of: ";"),
-               semi <= s.index(i, offsetBy: 11) {
+               semi <= (s.index(i, offsetBy: 11, limitedBy: s.endIndex) ?? s.endIndex) {
                 let ent = String(s[s.index(after: i)..<semi]).lowercased()
                 if ent.hasPrefix("#x"), let code = UInt32(ent.dropFirst(2), radix: 16),
                    let scalar = Unicode.Scalar(code) {
