@@ -101,6 +101,12 @@ struct SidebarView: View {
                             .font(.caption)
                             .padding()
                     } else {
+                        if model.searchTotal > model.searchHits.count {
+                            Text("共 \(model.searchTotal) 条命中,仅显示前 \(model.searchHits.count) 条")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .padding(.top, 2)
+                        }
                         List(model.searchHits, id: \.path) { hit in
                             Button {
                                 model.activeTab?.pendingHighlight = model.searchQuery

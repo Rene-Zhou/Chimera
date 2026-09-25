@@ -55,7 +55,7 @@ final class CHMSchemeHandler: NSObject, WKURLSchemeHandler {
             var encodingName: String? = nil
             if mime == "text/html" || mime == "text/css" {
                 let lcid = ((try? container.systemInfo()) ?? nil)?.lcid
-                let declared = AppModel.charsetDeclared(in: data)
+                let declared = CHMCharset.declared(in: data)
                 let text = CHMTextDecoder(lcid: lcid, declaredCharset: declared).decode(data)
                 data = Data(text.utf8)
                 encodingName = "utf-8"

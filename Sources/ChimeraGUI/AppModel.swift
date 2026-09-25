@@ -124,6 +124,8 @@ final class AppModel: ObservableObject {
     @Published var searchIndex: CHMSearchIndex?
     @Published var indexBuilding = false
     @Published var searchHits: [CHMSearchHit] = []
+    /// 未截断的总命中数(用于"仅显示前 N 条"提示)。
+    @Published var searchTotal = 0
 
     // MARK: 页内查找
 
@@ -203,6 +205,7 @@ final class AppModel: ObservableObject {
         // 换书必须重置书级状态,否则搜索索引/命中/目录展开会沿用上一本
         searchQuery = ""
         searchHits = []
+        searchTotal = 0
         searchIndex = nil
         indexBuilding = false
         findVisible = false
@@ -328,8 +331,10 @@ final class AppModel: ObservableObject {
     // MARK: 搜索 / 查找 / 书签
 
     func runSearch() {
-        guard let idx = searchIndex else { searchHits = []; return }
-        searchHits = idx.search(searchQuery, limit: 200)
+        guard let idx = searchIndex else { searchHits = []; searchTotal = 0; return }
+        let results = idx.searchResults(searchQuery, limit: 200)
+        searchHits = results.hits
+        searchTotal = results.total
     }
 
     static func tocTitles(from items: [CHMTocItem]) -> [String: String] {
@@ -519,21 +524,5 @@ final class AppModel: ObservableObject {
         default:
             exit(0)
         }
-    }
-
-    /// 从前 4KB 粗提 <meta charset=…>。
-    static func charsetDeclared(in data: Data) -> String? {
-        let head = String(decoding: data.prefix(4096), as: UTF8.self)
-        guard let r = head.range(of: "charset=", options: .caseInsensitive) else { return nil }
-        var s = head[r.upperBound...]
-        if s.first == "\"" || s.first == "'" {
-            let quote = s.removeFirst()
-            guard let end = s.firstIndex(of: quote) else { return nil }
-            s = s[..<end]
-        } else if let end = s.firstIndex(where: { $0 == ";" || $0 == ">" || $0.isWhitespace }) {
-            s = s[..<end]
-        }
-        let name = s.trimmingCharacters(in: .whitespaces)
-        return name.isEmpty ? nil : name
     }
 }

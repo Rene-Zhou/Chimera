@@ -5,7 +5,7 @@
 
 | # | 功能 | 验收标准 | 证据 |
 |---|---|---|---|
-| F1 | 打开与渲染 | 打开显示正常,链接跳转,无外部请求 | 冒烟:`OPEN toc=29` → `SMOKE OK url=/第一章:进行游戏.htm textLen=8859`(chm:// 管线整读);SCHM 禁外网(scheme handler 唯一来源) |
+| F1 | 打开与渲染 | 打开显示正常,链接跳转,无外部请求 | 冒烟(强断言:`contentType==text/html` 且正文非空):`OPEN toc=29` → `SMOKE OK url=/序章：欢迎来到冒险世界.htm textLen=1113`(chm:// 管线整读)。注:初版断言仅查 innerText 长度,未能发现 mimeType 携带 charset 参数导致源码按纯文本显示的缺陷(用户实测抓出,fix 4268af0),已升级断言并修正 |
 | F2 | 编码兼容 | 目录/正文/搜索无乱码 | GBK 基准:CLI `toc` 中文树全对;冒烟渲染中文正文;单测 GBK/Big5/UTF-8/回退链 8 例 |
 | F3 | 目录树 | 层级完整无乱码,点击导航 | 冒烟 `OPEN toc=29`;CLI toc 输出(核心规则→玩家手册→序章→D20检定→豁免…);侧栏 List(children:) |
 | F4 | 索引页签 | 输入即时过滤 | parseIndex+过滤 UI 就绪;基准 .hhk 为生成器空壳(数据本身无索引项,单测覆盖) |
