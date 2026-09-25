@@ -5,7 +5,7 @@
 
 | # | 功能 | 验收标准 | 证据 |
 |---|---|---|---|
-| F1 | 打开与渲染 | 打开显示正常,链接跳转,无外部请求 | 冒烟(强断言:`contentType==text/html` 且正文非空):`OPEN toc=29` → `SMOKE OK textLen>0`(chm:// 管线整读)。导航策略:仅 chm:// 站内加载,http/https 转外部浏览器,其他 scheme 取消(代码审查;基准书无外链可触发) |
+| F1 | 打开与渲染 | 打开显示正常,链接跳转,无外部请求 | 冒烟(强断言:`contentType==text/html` 且正文非空):`OPEN toc=29` → `SMOKE OK textLen>0`(chm:// 管线整读)。导航策略:仅 chm:// 站内加载;**抓取站 https 站内链接按文件名回投容器内页面**(冒烟 LINKBACK:术语释义页 https 链接点击 → /动作.htm,#锚点保留);无法回投的 http(s) 转外部浏览器;WKContentRuleList 屏蔽全部 http(s) 子资源(远程图片等),落实离线 |
 | F2 | 编码兼容 | 目录/正文/搜索无乱码 | GBK 基准:CLI `toc` 中文树全对;冒烟渲染中文正文;单测 GBK/Big5/UTF-8/回退链 14 例;搜索索引与渲染统一按页嗅探 meta charset(CHMCharset.declared 下沉 Core) |
 | F3 | 目录树 | 层级完整无乱码,点击导航,记住展开状态 | 冒烟 `OPEN toc=29`;**修复**:弃用 List(children:)(父节点点击被展开手势吃掉),改递归 TOCNodeView——点标题导航/点箭头展开,真机点击验证 lastPath 变化;展开集合按书持久化(TOCExpansion/*.json,重启恢复,真机验证) |
 | F4 | 索引页签 | 输入即时过滤 | parseIndex+过滤 UI 就绪;基准 .hhk 为生成器空壳(数据本身无索引项,单测覆盖) |
