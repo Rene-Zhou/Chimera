@@ -42,20 +42,23 @@ final class CHMSchemeHandler: NSObject, WKURLSchemeHandler {
                 mime = "text/html"
             }
 
-            // 文本类:按解码链转 UTF-8 并显式标注 charset,渲染不依赖页面内 meta
+            // 文本类:按解码链转 UTF-8。
+            // 注意:mimeType 只能是纯类型("text/html"),charset 必须走 textEncodingName,
+            // 否则 WebKit 识别不了而按纯文本展示源码(此缺陷曾导致正文显示为 HTML 源码)。
+            var encodingName: String? = nil
             if mime == "text/html" || mime == "text/css" {
                 let lcid = ((try? container.systemInfo()) ?? nil)?.lcid
                 let declared = AppModel.charsetDeclared(in: data)
                 let text = CHMTextDecoder(lcid: lcid, declaredCharset: declared).decode(data)
                 data = Data(text.utf8)
-                mime += "; charset=utf-8"
+                encodingName = "utf-8"
             }
 
             let response = URLResponse(
                 url: url,
                 mimeType: mime,
                 expectedContentLength: data.count,
-                textEncodingName: "utf-8"
+                textEncodingName: encodingName
             )
             task.didReceive(response)
             task.didReceive(data)

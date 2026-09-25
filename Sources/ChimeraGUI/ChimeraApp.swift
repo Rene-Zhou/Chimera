@@ -569,7 +569,12 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
         }
         if let m = model { applyFont(m.settings) }
         if smoke {
-            webView.evaluateJavaScript("document.body ? document.body.innerText.length : -1") { r, _ in
+            // 强断言:contentType 必须是 text/html 且正文非空——把源码当文本显示时此处返回 -1
+            webView.evaluateJavaScript(
+                "(document.contentType && document.contentType.indexOf('text/html')===0 "
+                + "&& document.body && document.body.innerText.length>0) "
+                + "? document.body.innerText.length : -1"
+            ) { r, _ in
                 self.model?.tabDidFinish(self, textLen: (r as? Int) ?? -1)
             }
         }
