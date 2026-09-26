@@ -416,6 +416,27 @@ import Foundation
     }
 }
 
+@Test func cacheKeyEmbedsFormatVersion() throws {
+    // 格式版本必须进入缓存键:持久化结构变更(如新增 headings)后,
+    // 旧缓存 URL 不再命中→自动重建;否则旧缓存静默缺信号且永不失效
+    #expect(CHMSearchIndex.cacheFormatVersion >= 2,
+            "headings 数组化后应至少为 v2")
+    let f = FileManager.default.temporaryDirectory
+        .appendingPathComponent("chimera-key-\(UUID().uuidString).dat")
+    try Data("x".utf8).write(to: f)
+    defer { try? FileManager.default.removeItem(at: f) }
+
+    let key = CHMSearchIndex.cacheKey(for: f)
+    #expect(key.hasSuffix("|v\(CHMSearchIndex.cacheFormatVersion)"),
+            "版本号应为键尾段,实际 \(key)")
+    #expect(CHMSearchIndex.cacheKey(for: f) == key, "同一文件键应稳定")
+
+    // mtime 变化 → 键变化(既有语义保留)
+    try? FileManager.default.setAttributes(
+        [.modificationDate: Date(timeIntervalSince1970: 1_700_000_000)], ofItemAtPath: f.path)
+    #expect(CHMSearchIndex.cacheKey(for: f) != key)
+}
+
 // MARK: - 基准集成(记录耗时)
 
 @Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))

@@ -57,10 +57,8 @@ enum ChimeraStateDir {
     /// 搜索索引缓存位置:默认走 Core 规则;隔离模式下重定向(键算法镜像 Core:路径|大小|mtime)。
     static func indexCacheURL(for bookURL: URL) -> URL {
         guard overrideRoot != nil else { return CHMSearchIndex.cacheURL(for: bookURL) }
-        let attrs = try? FileManager.default.attributesOfItem(atPath: bookURL.path)
-        let size = attrs?[.size] as? Int ?? 0
-        let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-        let key = "\(bookURL.path)|\(size)|\(String(format: "%.0f", mtime))"
+        // 键算法引用 Core(含格式版本),与默认路径保持同步失效
+        let key = CHMSearchIndex.cacheKey(for: bookURL)
         let dir = root.appendingPathComponent("IndexCache", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("\(bookDigest(key)).idx")

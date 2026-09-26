@@ -768,14 +768,23 @@ public struct CHMSearchIndex: Codable {
 
     // MARK: - 缓存
 
-    /// 缓存键:文件路径+大小+mtime 的 SHA256 → ~/Library/Caches/Chimera/<hash>.idx
-    /// (文件未变更时键稳定;变更后自然失效)。
-    public static func cacheURL(for url: URL) -> URL {
+    /// 索引缓存格式版本:持久化结构变更(新增/改变字段,如 v2 的 headings
+    /// 数组)时 +1,进入缓存键——旧缓存 URL 自然不再命中,下次搜索自动重建
+    /// (书的 mtime 不变时也如此;否则旧缓存静默缺新信号且永不失效)。
+    public static let cacheFormatVersion = 2
+
+    /// 缓存键:路径|大小|mtime|v版本号(文件未变更时稳定;变更后自然失效)。
+    /// public:AppModel 的隔离模式(CHIMERA_STATE_DIR)镜像同键算法。
+    public static func cacheKey(for url: URL) -> String {
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
         let size = attrs?[.size] as? Int ?? 0
         let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-        let key = "\(url.path)|\(size)|\(String(format: "%.0f", mtime))"
-        let digest = SHA256.hash(data: Data(key.utf8))
+        return "\(url.path)|\(size)|\(String(format: "%.0f", mtime))|v\(cacheFormatVersion)"
+    }
+
+    /// 缓存位置:键的 SHA256 → ~/Library/Caches/Chimera/<hash>.idx
+    public static func cacheURL(for url: URL) -> URL {
+        let digest = SHA256.hash(data: Data(cacheKey(for: url).utf8))
             .map { String(format: "%02x", $0) }.joined().prefix(24)
         let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Chimera", isDirectory: true)
