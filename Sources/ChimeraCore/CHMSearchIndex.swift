@@ -141,15 +141,27 @@ public struct CHMSearchIndex: Codable {
         tocTitles: [String: String] = [:],
         progress: ((Int, Int) -> Void)? = nil
     ) throws -> CHMSearchIndex {
+        try build(container: container, entries: try container.allEntries(),
+                  tocTitles: tocTitles, progress: progress)
+    }
+
+    /// 同上,但接收调用方已枚举的条目(allEntries() 结果)以复用枚举。
+    /// 内部自行过滤 .htm/.html 非目录条目。
+    public static func build(
+        container: CHMContainer,
+        entries: [CHMEntry],
+        tocTitles: [String: String] = [:],
+        progress: ((Int, Int) -> Void)? = nil
+    ) throws -> CHMSearchIndex {
         let info = try container.systemInfo()
-        let entries = try container.allEntries().filter { entry in
+        let htmlEntries = entries.filter { entry in
             !entry.isDirectory
                 && ["htm", "html"].contains((entry.path as NSString).pathExtension.lowercased())
         }
 
         var docs: [CHMSearchDocument] = []
-        docs.reserveCapacity(entries.count)
-        for (i, entry) in entries.enumerated() {
+        docs.reserveCapacity(htmlEntries.count)
+        for (i, entry) in htmlEntries.enumerated() {
             if let data = try? container.read(entry.path) {
                 let html = CHMTextDecoder.decode(data, lcid: info?.lcid)
                 let bare = String(entry.path.dropFirst())
@@ -160,7 +172,7 @@ public struct CHMSearchIndex: Codable {
                     docs.append(CHMSearchDocument(path: entry.path, title: title, text: text))
                 }
             }
-            progress?(i + 1, entries.count)
+            progress?(i + 1, htmlEntries.count)
         }
         return CHMSearchIndex(documents: docs)
     }

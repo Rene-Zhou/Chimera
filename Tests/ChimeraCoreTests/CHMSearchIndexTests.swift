@@ -125,6 +125,22 @@ import Foundation
 // MARK: - 基准集成(记录耗时)
 
 @Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func buildWithProvidedEntriesMatchesSubset() throws {
+    // 廉价等价性:传入条目子集构建,产出应是子集内的非空文本文档
+    let c = try CHMContainer(path: benchmarkCHMPath)
+    let all = try c.allEntries()
+    let html = all.filter {
+        !$0.isDirectory && ["htm", "html"].contains(($0.path as NSString).pathExtension.lowercased())
+    }
+    let subset = Array(html.prefix(30))
+    let subsetPaths = Set(subset.map(\.path))
+    let idx = try CHMSearchIndex.build(container: c, entries: subset)
+    #expect(!idx.documents.isEmpty)
+    #expect(idx.documents.allSatisfy { subsetPaths.contains($0.path) },
+            "entries 重载不应索引子集之外的页面")
+}
+
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
 func buildsIndexFromBenchmark() throws {
     let c = try CHMContainer(path: benchmarkCHMPath)
     let started = Date()

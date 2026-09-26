@@ -9,11 +9,19 @@ public struct CHMEntry: Equatable, Sendable {
     public let length: UInt64
     /// 是否为目录(CHM 目录路径以 "/" 结尾)。
     public let isDirectory: Bool
+    /// 存储空间:0=未压缩(数据区直读),1=LZX 压缩
+    /// (对应 chm_lib.h 的 CHM_UNCOMPRESSED/CHM_COMPRESSED)。
+    public let space: UInt32
+    /// 条目在存储空间中的起始偏移(未压缩=数据区偏移;压缩=LZX 流内偏移)。
+    /// 与 length/space 一起供零 resolve 读取(read(entry:))使用。
+    public let start: UInt64
 
-    public init(path: String, length: UInt64, isDirectory: Bool) {
+    public init(path: String, length: UInt64, isDirectory: Bool, space: UInt32, start: UInt64) {
         self.path = path
         self.length = length
         self.isDirectory = isDirectory
+        self.space = space
+        self.start = start
     }
 }
 
@@ -97,7 +105,8 @@ public final class CHMContainer {
                 let raw = withUnsafeBytes(of: info.path) { Array($0.prefix(while: { $0 != 0 })) }
                 let path = Self.decodePath(raw, lcid: lcid)
                 entries.append(
-                    CHMEntry(path: path, length: info.length, isDirectory: path.hasSuffix("/"))
+                    CHMEntry(path: path, length: info.length, isDirectory: path.hasSuffix("/"),
+                             space: UInt32(info.space), start: info.start)
                 )
             }
         }
@@ -120,7 +129,8 @@ public final class CHMContainer {
         guard chm_resolve_object(handle, normalized, &ui) == CHM_RESOLVE_SUCCESS else {
             return nil
         }
-        return CHMEntry(path: normalized, length: ui.length, isDirectory: normalized.hasSuffix("/"))
+        return CHMEntry(path: normalized, length: ui.length, isDirectory: normalized.hasSuffix("/"),
+                        space: UInt32(ui.space), start: ui.start)
     }
 
     // MARK: - 读取
@@ -131,6 +141,22 @@ public final class CHMContainer {
             throw CHMError.entryNotFound(path)
         }
         return try read(path, range: 0..<entry.length)
+    }
+
+    /// 零 resolve 读取:entry 必须来自本容器(allEntries()/entry(at:)),
+    /// 直接以 entry 携带的 start/space/length 驱动 chm_retrieve_object,
+    /// 省去每次读取的目录页查找(malloc + pread + 线性扫描)。
+    public func read(entry: CHMEntry) throws -> Data {
+        try read(entry: entry, range: 0..<entry.length)
+    }
+
+    /// 零 resolve 按区间读取 entry。
+
+    /// 零 resolve 按区间读取 entry。
+    public func read(entry: CHMEntry, range: Range<UInt64>) throws -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return try readUnlocked(entry: entry, range: range)
     }
 
     /// 按字节区间读取条目(0-based,相对条目内容起点)。
@@ -148,7 +174,7 @@ public final class CHMContainer {
         return try readUnlocked(entry: entry, range: range)
     }
 
-    /// 调用方必须已持锁。
+    /// 调用方必须已持锁;entry 携带的定位信息直接使用,不再 resolve。
     private func readUnlocked(entry: CHMEntry, range: Range<UInt64>) throws -> Data {
         guard let handle else { throw CHMError.invalidFormat("container closed") }
         let total = Int(range.count)
@@ -159,10 +185,11 @@ public final class CHMContainer {
         )
         defer { buffer.deallocate() }
 
+        // 重建最小 chmUnitInfo:chm_retrieve_object 只用 space/start/length
         var ui = chmUnitInfo()
-        guard chm_resolve_object(handle, entry.path, &ui) == CHM_RESOLVE_SUCCESS else {
-            throw CHMError.entryNotFound(entry.path)
-        }
+        ui.space = Int32(entry.space)
+        ui.start = entry.start
+        ui.length = entry.length
 
         var filled = 0
         while filled < total {
@@ -196,6 +223,16 @@ public final class CHMContainer {
             systemInfoCache = CHMSystemInfoParser.parse(raw)
         }
         return systemInfoCache
+    }
+
+    /// 调整 LZX 解压块缓存容量。chmlib 默认仅缓存 5 块(典型 32KB/块,
+    /// 共 160KB);批量顺序读取(如索引构建)前调大可显著减少重复解压。
+    /// 注意:重建缓存会丢弃既有缓存块,应在批量读取开始前调用。
+    public func setCacheBlockCount(_ count: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle, count > 0 else { return }
+        chm_set_param(handle, CHM_PARAM_MAX_BLOCKS_CACHED, Int32(count))
     }
 
     // MARK: - 路径解码

@@ -77,3 +77,48 @@ func containerThrowsOnMissingEntryRead() throws {
         _ = try c.read("/ghost.htm")
     }
 }
+
+// MARK: - 零 resolve 读取契约(read(entry:)/start/space)
+
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func containerEntryCarriesLocationFields() throws {
+    let c = try makeContainer()
+    let entries = try c.allEntries()
+    // 枚举产出的条目应携带定位信息(空间合法 + 与按路径解析一致)
+    let html = try #require(entries.first { !$0.isDirectory && $0.path.hasSuffix(".hhc") })
+    #expect(html.space == 0 || html.space == 1, "space 应为 CHM_UNCOMPRESSED/CHM_COMPRESSED")
+    let resolved = try #require(c.entry(at: html.path), "按路径解析同一页应成功")
+    #expect(resolved == html, "枚举与解析产出的条目(含 start/space)应一致")
+}
+
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func containerReadByEntryMatchesReadByPath() throws {
+    let c = try makeContainer()
+    let entries = try c.allEntries()
+    // 整读等价:.hhc 小文件
+    let hhc = try #require(entries.first { $0.path.hasSuffix(".hhc") })
+    let viaEntry = try c.read(entry: hhc)
+    let viaPath = try c.read(hhc.path)
+    #expect(viaEntry == viaPath, "零 resolve 读取应与路径读取字节一致")
+    // 区间读等价:$FIftiMain 头 4KB(大压缩条目)
+    let fifti = try #require(entries.first { $0.path == "/$FIftiMain" })
+    let headEntry = try c.read(entry: fifti, range: 0..<4096)
+    let headPath = try c.read("/$FIftiMain", range: 0..<4096)
+    #expect(headEntry == headPath)
+}
+
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func containerSetCacheBlockCountKeepsReadsCorrect() throws {
+    let c = try makeContainer()
+    c.setCacheBlockCount(128)
+    let entries = try c.allEntries()
+    let hhc = try #require(entries.first { $0.path.hasSuffix(".hhc") })
+    // 调大缓存后读取仍应正确,且与默认缓存时字节一致
+    let after = try c.read(entry: hhc)
+    c.setCacheBlockCount(5)
+    let restored = try c.read(entry: hhc)
+    #expect(after == restored)
+    // 非法容量应被忽略而非崩溃
+    c.setCacheBlockCount(0)
+    _ = try c.read(entry: hhc)
+}
