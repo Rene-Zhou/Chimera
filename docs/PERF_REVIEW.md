@@ -1,5 +1,8 @@
 # 性能与实现问题审查(2026-09-27)
 
+> **状态:已修复完毕(同日整合)**。P0 全部、P1-7/8/9、P2-10/11/12/13 已落地;
+> 验收:71/71 测试全绿(基线 53),全量冒烟 7 场景 PASS,索引构建
+> 7028 页 16.31s → 4.19s(≈3.9×)。P1-6、P2-14、P2-15 明确暂缓(见文末)。
 > 来源:全量代码审查。按影响分级编号;每条标注负责工作流(WS-A~D)、
 > 涉及文件与验收标准。文件所有权互斥,确保 4 个并行 worktree 无合并冲突。
 > 测试规范:swift-testing(`@Test`/`#expect`/`#require`),CLT 环境用
@@ -8,7 +11,7 @@
 
 ## P0 架构级(高影响)
 
-### P0-1 scheme handler 在主线程做同步 I/O + LZX 解压 【WS-C】
+### P0-1 scheme handler 在主线程做同步 I/O + LZX 解压 【WS-C ✅】
 - 文件:`Sources/ChimeraGUI/CHMSchemeHandler.swift`
 - 问题:`WKURLSchemeHandler` 回调在主线程调用,`start` 同步执行
   `entry(at:)` + `read()`(pread + LZX 解压),每个子资源(HTML/CSS/图片)
@@ -19,7 +22,7 @@
 - 验收:smoke OPEN/NAV/SEARCH 场景通过;`stop` 被调用后不再向已停止的
   task 发任何回调(WebKit 会因此 crash,需防)。
 
-### P0-2 UI 渲染与后台索引构建争抢同一把锁 【WS-D】
+### P0-2 UI 渲染与后台索引构建争抢同一把锁 【WS-D ✅】
 - 文件:`Sources/ChimeraGUI/AppModel.swift`
 - 问题:索引构建持 `CHMContainer.NSLock` 逐页解压,WebView 资源请求
   在主线程排队等锁,首开大书边建索引边翻页持续卡顿。
@@ -27,7 +30,7 @@
   (CHM 只读,多句柄安全),UI 句柄不再被索引阻塞。
 - 验收:smoke SEARCH 场景通过(该场景同时建索引+导航,天然覆盖)。
 
-### P0-3 一次读取最多 4 次 `chm_resolve_object`,目录页无缓存 【WS-A】
+### P0-3 一次读取最多 4 次 `chm_resolve_object`,目录页无缓存 【WS-A ✅】
 - 文件:`Sources/ChimeraCore/CHMContainer.swift`
 - 问题:`read(_:)` = entry(at:) 1 次 + read(range:) 内 2 次;scheme handler
   外面再 1 次。chmlib 每次 resolve 都 malloc + pread 目录页 + 线性扫描,
@@ -40,7 +43,7 @@
   `entry(at:)`/`read(_:)` 结果与首次一致;`read(_:)` 与 `read(entry:)`
   字节一致(基准书)。
 
-### P0-4 索引构建:目录序随机访问 + LZX 重置区间惩罚 + 块缓存仅 5 块 【WS-B】
+### P0-4 索引构建:目录序随机访问 + LZX 重置区间惩罚 + 块缓存仅 5 块 【WS-B ✅】
 - 文件:`Sources/ChimeraCore/CHMSearchIndex.swift`
 - 问题:build 按目录序(≈路径字典序)读取,与数据物理顺序无关;LZX 有状态,
   随机访问需解压自上次 reset 以来的全部块;`CHM_MAX_BLOCKS_CACHED=5`
@@ -52,7 +55,7 @@
 - 验收:`build(container:entries:)` 与旧行为等价(文档集合一致,基准书);
   新增基准测试对比排序前后 build 耗时(打印即可,不作硬断言)。
 
-### P0-5 `AppModel.open` 全程主线程同步 【WS-D】
+### P0-5 `AppModel.open` 全程主线程同步 【WS-D ✅】
 - 文件:`Sources/ChimeraGUI/AppModel.swift`
 - 问题:`allEntries()`(全目录枚举+路径解码)、.hhc/.hhk 读取+解码+解析
   (大书 TOC 可达 MB 级)全在主线程,大书首开转圈。
@@ -68,14 +71,14 @@
   plist 缓存全量落盘。当前规模(36MB 书)可接受,改进需侵入摘要生成链,
   本轮不做,留待数据结构升级(倒排/三元组)时一并处理。
 
-### P1-7 `CHMSnippet.around` 每命中复制整页文本 【WS-B】
+### P1-7 `CHMSnippet.around` 每命中复制整页文本 【WS-B ✅】
 - 文件:`Sources/ChimeraCore/CHMSearchIndex.swift`
 - 问题:`Array(text)` O(页长)/次,200 命中 = 200 次全页拷贝。
 - 修复:用 `text.index(_:offsetBy:)` 直接定位窗口边界,不整页拷贝;
   `while s.contains("  ")` 折叠改为单趟扫描。
 - 验收:现有 snippet 测试全绿;新增长文本(>100k 字符)正确性测试。
 
-### P1-8 SwiftUI 粗粒度观察:搜索框逐键失效整个侧栏 【WS-D】
+### P1-8 SwiftUI 粗粒度观察:搜索框逐键失效整个侧栏 【WS-D ✅】
 - 文件:`Sources/ChimeraGUI/Views/SidebarView.swift`
 - 问题:`searchQuery` 每字符变化重算 `TOCFlattener.flatten`(展开态上万节点)
   + LazyVStack 全量 diff;索引过滤同理逐键全量过滤。
@@ -83,7 +86,7 @@
   TOC 扁平化按 expanded 集合 memoize(struct 缓存)。
 - 验收:smoke 通过;行为不变(回车才搜索;过滤仍即时)。
 
-### P1-9 `plainText` script/style 剥离 O(n·k) + 多趟处理 【WS-B】
+### P1-9 `plainText` script/style 剥离 O(n·k) + 多趟处理 【WS-B ✅】
 - 文件:`Sources/ChimeraCore/CHMSearchIndex.swift`
 - 问题:`while range(of:)+removeSubrange` 每块整体拷贝后文;之后三趟拷贝。
 - 修复:单趟扫描(标签/注释→script-style 区间跳过、实体解码、空白折叠
@@ -92,11 +95,11 @@
 
 ## P2 小问题 / 健壮性
 
-### P2-10 `highlightJS` 循环内重复 `q.toLowerCase()` 【WS-D】
+### P2-10 `highlightJS` 循环内重复 `q.toLowerCase()` 【WS-D ✅】
 - 文件:`Sources/ChimeraGUI/ReaderTab.swift`(findJS 已提升,两处不一致)。
 - 验收:smoke FIND 场景通过。
 
-### P2-11 首开离线拦截规则异步安装竞态 【WS-D】
+### P2-11 首开离线拦截规则异步安装竞态 【WS-D ✅】
 - 文件:`Sources/ChimeraGUI/ReaderTab.swift`
 - 问题:规则未编译完成时首个页面已加载,外部 http(s) 子资源可能漏网,
   违反 PRD"无外部网络请求"。
@@ -104,11 +107,11 @@
   后续加载不受阻。
 - 验收:代码审查 + smoke;无法单测,逻辑保持简单。
 
-### P2-12 build 静默吞错(`try?`) 【WS-B】
+### P2-12 build 静默吞错(`try?`) 【WS-B ✅】
 - 修复:读取失败页记录(print 单行汇总即可),不再无声跳过。
 - 验收:测试可注入读取失败(不可行则代码审查)。
 
-### P2-13 404 页路径未转义直插 HTML 【WS-C】
+### P2-13 404 页路径未转义直插 HTML 【WS-C ✅】
 - 修复:新增 `CHMCore` 的 `escapeHTML` 小助手(新文件),404 页经转义;
   助手有单测。验收:单测覆盖 `<`、`&`、`"`、中文原样。
 
