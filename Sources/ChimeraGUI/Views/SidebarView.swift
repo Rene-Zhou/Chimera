@@ -38,20 +38,14 @@ struct SidebarView: View {
                     VStack(spacing: 0) {
                         HStack {
                             Spacer()
-                            Button { model.collapseAllTOC() } label: {
-                                Image(systemName: "rectangle.compress.vertical")
-                            }
-                            .buttonStyle(.borderless)
-                            .foregroundStyle(.secondary)
-                            .help(Text("全部收起"))
-                            .accessibilityLabel(Text("全部收起"))
-                            Button { model.expandAllTOC() } label: {
-                                Image(systemName: "rectangle.expand.vertical")
-                            }
-                            .buttonStyle(.borderless)
-                            .foregroundStyle(.secondary)
-                            .help(Text("全部展开"))
-                            .accessibilityLabel(Text("全部展开"))
+                            Button("全部收起") { model.collapseAllTOC() }
+                                .buttonStyle(.borderless)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Button("全部展开") { model.expandAllTOC() }
+                                .buttonStyle(.borderless)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                         .padding(.horizontal, 10)
                         .padding(.bottom, 2)
