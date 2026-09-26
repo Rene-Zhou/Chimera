@@ -218,7 +218,7 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
     }
 
     /// 目录异步解析完成后由模型调用:以刚就绪的 TOC 标题重刷标签标题
-    /// (异步打开时首屏标题先以 <title>/路径兑底)。
+    /// (异步打开时首屏标题先以 <title>/路径兜底)。
     func refreshTitle() { updatePageTitle() }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

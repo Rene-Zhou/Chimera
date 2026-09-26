@@ -325,7 +325,7 @@ final class AppModel: ObservableObject {
     }
 
     /// 解析结果回填书级状态(主线程),并刷新既有标签标题(异步解析时
-    /// 首屏标题先以 <title>/路径兑底,解析完成后按 TOC 重刷)。
+    /// 首屏标题先以 <title>/路径兜底,解析完成后按 TOC 重刷)。
     private func applySitemaps(_ parsed: SitemapParse) {
         bookTOC = parsed.toc
         bookIndexEntries = parsed.indexEntries

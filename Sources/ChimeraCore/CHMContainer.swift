@@ -36,6 +36,13 @@ public enum CHMError: Error, Equatable {
 /// CHM 文件的 Swift 侧容器抽象:枚举条目、按路径解析、按需读取
 /// (LZX 解压由 chmlib 完成)、系统元数据(LCID/标题/默认页)。
 /// chmlib 的文件句柄非线程安全,内部以锁串行化。
+/// 线程安全由锁保证(所有可变状态均在其保护下),故可跨线程传递:
+/// UI 句柄与索引构建句柄(独立实例)分别用于主线程与后台队列。
+extension CHMContainer: @unchecked Sendable {}
+
+/// CHM 文件的 Swift 侧容器抽象:枚举条目、按路径解析、按需读取
+/// (LZX 解压由 chmlib 完成)、系统元数据(LCID/标题/默认页)。
+/// chmlib 的文件句柄非线程安全,内部以锁串行化。
 public final class CHMContainer {
     private var handle: OpaquePointer?
     private let lock = NSLock()
@@ -43,6 +50,7 @@ public final class CHMContainer {
     private var systemInfoLoaded = false
     /// 仅供测试观测:实际调用 chm_resolve_object 的次数(条目查询缓存命中不计入)。
     /// 用于验证缓存/单次 resolve 优化确实生效。
+    /// 仅在 lock 内写入;测试单线程读取,生产代码不读。
     private(set) var resolveCount = 0
     /// 条目查询缓存(归一化路径 → 条目)。容器不可变(文件只读打开),
     /// 只增不失效;读写均在 lock 内。chmlib 目录匹配是大小写不敏感的
@@ -137,7 +145,7 @@ public final class CHMContainer {
         guard let handle else { return nil }
         let normalized = Self.normalize(path)
         // 仅精确匹配命中(保持 chmlib 大小写不敏感语义不变);
-        // 变体/未见过路径走 resolve 兑底并回填
+        // 变体/未见过路径走 resolve 兜底并回填
         if let hit = entryCache[normalized] { return hit }
         var ui = chmUnitInfo()
         resolveCount += 1
