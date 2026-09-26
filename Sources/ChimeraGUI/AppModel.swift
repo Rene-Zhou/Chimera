@@ -247,15 +247,12 @@ final class AppModel: ObservableObject {
             bookmarks = bookmarkStore?.bookmarks ?? []
             tocTitleMap = Self.tocTitles(from: toc)
 
-            // 目录展开状态:有存档恢复存档;首次打开默认展开顶层节点
+            // 目录展开状态:有存档恢复存档;首次打开默认全部收起
             let expStore = TOCExpansionStore(
                 storageURL: ChimeraStateDir.tocExpansionStorageURL(for: url))
             tocExpansionStore = expStore
             if let stored = expStore.expanded {
                 tocExpanded = stored
-            } else {
-                tocExpanded = Set(toc.filter { !$0.children.isEmpty }.map { TOCTreeNode($0).id })
-                expStore.save(tocExpanded)
             }
 
             // 状态记忆:恢复上次阅读位置(条目仍存在时),并登记最近打开
@@ -326,6 +323,26 @@ final class AppModel: ObservableObject {
             tocExpanded.insert(id)
         }
         tocExpansionStore?.save(tocExpanded)
+    }
+
+    /// 全部展开(仅含子节点的目录项参与展开集合)。
+    func expandAllTOC() {
+        guard let doc = document else { return }
+        var ids: Set<String> = []
+        func walk(_ items: [CHMTocItem]) {
+            for it in items where !it.children.isEmpty {
+                ids.insert(TOCTreeNode(it).id)
+                walk(it.children)
+            }
+        }
+        walk(doc.toc)
+        tocExpanded = ids
+        tocExpansionStore?.save(ids)
+    }
+
+    func collapseAllTOC() {
+        tocExpanded = []
+        tocExpansionStore?.save([])
     }
 
     // MARK: 搜索 / 查找 / 书签

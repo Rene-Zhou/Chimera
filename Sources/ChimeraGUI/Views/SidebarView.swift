@@ -35,14 +35,35 @@ struct SidebarView: View {
                     // 自绘树:List(children:) 的整行点击会被展开手势吃掉,
                     // 既有 local 又有 children 的节点无法导航。改为递归行视图:
                     // 点标题=导航,点箭头=展开/收起,展开状态按书持久化(PRD F3)。
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 2) {
-                            ForEach(toc.map(TOCTreeNode.init)) { node in
-                                TOCNodeView(node: node, model: model, depth: 0)
+                    VStack(spacing: 0) {
+                        HStack {
+                            Spacer()
+                            Button { model.collapseAllTOC() } label: {
+                                Image(systemName: "rectangle.compress.vertical")
                             }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(.secondary)
+                            .help(Text("全部收起"))
+                            .accessibilityLabel(Text("全部收起"))
+                            Button { model.expandAllTOC() } label: {
+                                Image(systemName: "rectangle.expand.vertical")
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(.secondary)
+                            .help(Text("全部展开"))
+                            .accessibilityLabel(Text("全部展开"))
                         }
-                        .padding(.vertical, 4)
-                        .padding(.horizontal, 6)
+                        .padding(.horizontal, 10)
+                        .padding(.bottom, 2)
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 2) {
+                                ForEach(toc.map(TOCTreeNode.init)) { node in
+                                    TOCNodeView(node: node, model: model, depth: 0)
+                                }
+                            }
+                            .padding(.vertical, 4)
+                            .padding(.horizontal, 6)
+                        }
                     }
                 }
             case .marks:

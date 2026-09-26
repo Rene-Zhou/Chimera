@@ -44,3 +44,5 @@
 "打开 CHM 文件" = "Open CHM File";
 "选择一本 CHM 电子书" = "Choose a CHM eBook";
 "缺少默认页(#SYSTEM code 2)" = "Missing default page (#SYSTEM code 2)";
+"全部收起" = "Collapse All";
+"全部展开" = "Expand All";
