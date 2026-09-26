@@ -119,7 +119,7 @@ import Foundation
     #expect(many.search("命中", limit: 10).count == 10)
 }
 
-@Test func searchRanksTitleMatchesFirst() {
+@Test func searchRanksTitleMatchesFirst() throws {
     let docs = [
         CHMSearchDocument(path: "/a.htm", title: "无标题命中", text: "这里有法术说明"),
         CHMSearchDocument(path: "/b.htm", title: "法术大全", text: "无关正文"),
@@ -127,9 +127,10 @@ import Foundation
     ]
     let idx = CHMSearchIndex(documents: docs)
     let results = idx.searchResults("法术")
-    // 仅标题命中的 /b.htm 也应计入结果,且标题命中排在正文命中之前
+    // 相关度排序:标题分级 b(前缀 ×5)居首;正文两页按密度×首现位置排——
+    // c 更短更密(1.62) > a(1.56),与旧的文档顺序相反
     #expect(results.total == 3)
-    #expect(results.hits.map(\.path) == ["/b.htm", "/a.htm", "/c.htm"])
+    #expect(results.hits.map(\.path) == ["/b.htm", "/c.htm", "/a.htm"])
     #expect(results.hits[0].isTitleMatch)
     #expect(results.hits[0].snippet.contains("法术大全"), "仅标题命中时摘要取自标题")
     #expect(!results.hits[1].isTitleMatch)
@@ -146,6 +147,136 @@ import Foundation
     #expect(results.total == 50, "limit 截断不影响 total")
     // 空查询:total 为 0
     #expect(many.searchResults("   ").total == 0)
+}
+
+// MARK: - 相关度重排序(多词 AND + 词频/密度/标题分级/整词边界/短语加权)
+
+@Test func searchRanksByTermFrequency() throws {
+    // 同量级文档:提及 3 次 > 1 次(词频饱和 1+ln(tf))
+    let docs = [
+        CHMSearchDocument(path: "/once.htm", title: "T1", text: "介绍 法术 的一次提及"),
+        CHMSearchDocument(path: "/triple.htm", title: "T2", text: "法术、法术与法术的多次提及"),
+    ]
+    let idx = CHMSearchIndex(documents: docs)
+    let first = try #require(idx.searchResults("法术").hits.first)
+    #expect(first.path == "/triple.htm")
+}
+
+@Test func searchPrefersDenseShortPage() throws {
+    // 密度归一:3 次提及的超长页 < 1 次提及的短页(同频次短页优先的推广)
+    let long = String(repeating: "填充", count: 2000) + " 法术 段落一 "
+        + String(repeating: "内容", count: 2000) + " 法术 段落二 "
+        + String(repeating: "补充", count: 1000) + " 法术 段落三"
+    let short = "法术 简短说明"
+    let docs = [
+        CHMSearchDocument(path: "/long.htm", title: "L", text: long),
+        CHMSearchDocument(path: "/short.htm", title: "S", text: short),
+    ]
+    let idx = CHMSearchIndex(documents: docs)
+    let first = try #require(idx.searchResults("法术").hits.first)
+    #expect(first.path == "/short.htm")
+}
+
+@Test func searchTitleGradingExactPrefixContains() throws {
+    // 标题分级:精确(×8) > 前缀(×5) > 包含(×2) > 仅正文;文档故意逆序放入
+    let docs = [
+        CHMSearchDocument(path: "/contains.htm", title: "大全法术目录", text: "完全无关的内容三"),
+        CHMSearchDocument(path: "/prefix.htm", title: "法术大全", text: "完全无关的内容二"),
+        CHMSearchDocument(path: "/body.htm", title: "其他", text: "前言 法术 介绍与说明"),
+        CHMSearchDocument(path: "/exact.htm", title: "法术", text: "完全无关的内容一"),
+    ]
+    let idx = CHMSearchIndex(documents: docs)
+    #expect(idx.searchResults("法术").hits.map(\.path)
+        == ["/exact.htm", "/prefix.htm", "/contains.htm", "/body.htm"])
+}
+
+@Test func searchMultiTermANDSemantics() throws {
+    // 多词 AND:全部词命中(正文或标题)才入选;零结果不回退 OR
+    let docs = [
+        CHMSearchDocument(path: "/both.htm", title: "两词", text: "火球是法术的一种"),
+        CHMSearchDocument(path: "/only1.htm", title: "单词", text: "只有法术的页面"),
+        CHMSearchDocument(path: "/only2.htm", title: "单词二", text: "只有火球的页面"),
+        CHMSearchDocument(path: "/title2.htm", title: "火球列表", text: "各种法术的介绍"),
+    ]
+    let idx = CHMSearchIndex(documents: docs)
+    let r = idx.searchResults("火球 法术")
+    #expect(Set(r.hits.map(\.path)) == ["/both.htm", "/title2.htm"])
+    #expect(r.total == 2)
+    // 火球仅标题命中:AND 由标题满足,isTitleMatch 为真
+    let t2 = try #require(r.hits.first { $0.path == "/title2.htm" })
+    #expect(t2.isTitleMatch)
+    // 任一词不存在 → 零结果,不得回退 OR
+    #expect(idx.searchResults("法术 完全不存在的词").total == 0)
+}
+
+@Test func searchPhraseBoostRanksContiguousFirst() throws {
+    // 短语加权:整串连续出现(含空格原样)×1.5,胜过同词频的分散出现
+    let docs = [
+        CHMSearchDocument(path: "/apart.htm", title: "T",
+                          text: "火球 开场介绍隔开较多文字内容 法术 各自出现一次的页面"),
+        CHMSearchDocument(path: "/adjacent.htm", title: "T",
+                          text: "介绍 火球 法术 连续出现的页面文字内容较多填充"),
+    ]
+    let idx = CHMSearchIndex(documents: docs)
+    let first = try #require(idx.searchResults("火球 法术").hits.first)
+    #expect(first.path == "/adjacent.htm")
+}
+
+@Test func searchDedupesRepeatedQueryTerms() {
+    // 重复词去重:"法术 法术" 与单词查询结果完全一致
+    let docs = [
+        CHMSearchDocument(path: "/a.htm", title: "A", text: "法术说明"),
+        CHMSearchDocument(path: "/b.htm", title: "法术列表", text: "无关"),
+        CHMSearchDocument(path: "/c.htm", title: "C", text: "法术、法术与法术"),
+    ]
+    let idx = CHMSearchIndex(documents: docs)
+    #expect(idx.searchResults("法术 法术").hits.map(\.path)
+        == idx.searchResults("法术").hits.map(\.path))
+    #expect(idx.searchResults("法术 法术").total == idx.searchResults("法术").total)
+}
+
+@Test func searchASCIIWholeWordOutranksSubstring() throws {
+    // ASCII 词边界:整词 "art" ×3 胜过等次数纯子串 "start" 里的 art
+    let docs = [
+        CHMSearchDocument(path: "/substr.htm", title: "T", text: "start start start of motion"),
+        CHMSearchDocument(path: "/whole.htm", title: "T", text: "art art art of combat"),
+    ]
+    let idx = CHMSearchIndex(documents: docs)
+    let first = try #require(idx.searchResults("art").hits.first)
+    #expect(first.path == "/whole.htm")
+}
+
+@Test func searchSnippetUsesRarestTerm() throws {
+    // 多词摘要:取该文档内命中次数最少的词(信息量最大)的首现窗口
+    let text = "法术一 法术二 法术三 法术四 法术五 中段介绍 罕见词 仅此一次 结尾说明"
+    let idx = CHMSearchIndex(documents: [
+        CHMSearchDocument(path: "/p.htm", title: "T", text: text),
+    ])
+    let hit = try #require(idx.searchResults("法术 罕见词").hits.first)
+    let expected = text.distance(from: text.startIndex,
+                                 to: text.range(of: "罕见词")!.lowerBound)
+    #expect(hit.offset == expected, "偏移应指向最稀有词首现,实际 \(hit.offset)")
+    #expect(hit.snippet.contains("罕见词"))
+}
+
+@Test func searchSingleTermResultSetMatchesSubstringSemantics() {
+    // 回归锁:单词查询的命中文档集合与"标题或正文包含"的子串语义逐一相等(排序可变)
+    let docs = [
+        CHMSearchDocument(path: "/a.htm", title: "法术大全", text: "无关一"),
+        CHMSearchDocument(path: "/b.htm", title: "其他", text: "正文含 DnD 检定"),
+        CHMSearchDocument(path: "/c.htm", title: "C", text: "完全无关"),
+        CHMSearchDocument(path: "/d.htm", title: "DND 手册", text: "正文 dnd 也出现"),
+    ]
+    let idx = CHMSearchIndex(documents: docs)
+    for q in ["法术", "dnd", "DnD"] {
+        let expected = Set(docs.filter {
+            $0.title.lowercased().contains(q.lowercased())
+                || $0.text.lowercased().contains(q.lowercased())
+        }.map(\.path))
+        let r = idx.searchResults(q)
+        #expect(r.total == expected.count, "查询 \(q): total \(r.total) 应为 \(expected.count)")
+        #expect(Set(r.hits.map(\.path)) == expected)
+    }
 }
 
 // MARK: - 缓存
@@ -280,4 +411,27 @@ func buildsIndexFromBenchmark() throws {
     try idx.save(to: cache)
     let loaded = try #require(try CHMSearchIndex.load(from: cache))
     #expect(loaded.documents.count == idx.documents.count)
+}
+
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func relevanceRankingOnBenchmark() throws {
+    let c = try CHMContainer(path: benchmarkCHMPath)
+    let idx = try CHMSearchIndex.build(container: c)
+    // 单词查询结果集不变性:与独立子串计数一致(排序可变,集合不变)
+    let expected = idx.documents.filter {
+        $0.titleLower.contains("法术") || $0.textLower.contains("法术")
+    }.count
+    let r = idx.searchResults("法术", limit: 200)
+    #expect(r.total == expected, "单词查询的命中文档集合不应变化")
+    // 多词 AND:命中数不多于单词;零结果不回退 OR
+    let multi = idx.searchResults("法术 职业", limit: 10)
+    #expect(multi.total <= r.total)
+    // 打分观测(人工检视):top-5 标题+分数,整轮打分耗时
+    let t = Date()
+    let scored = idx.scoredResults("法术")
+    let elapsed = Date().timeIntervalSince(t)
+    for (i, s) in scored.prefix(5).enumerated() {
+        print("RANK \(i + 1) score=\(String(format: "%.2f", s.score)) \(s.hit.title)")
+    }
+    print("BENCH relevance: 法术 scored \(scored.count) docs in \(String(format: "%.2f", elapsed))s")
 }

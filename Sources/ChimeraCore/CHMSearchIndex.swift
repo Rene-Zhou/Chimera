@@ -433,61 +433,207 @@ public struct CHMSearchIndex: Codable {
         searchResults(query, limit: limit).hits
     }
 
-    /// 大小写不敏感子串搜索:标题命中优先于正文命中,同级按文档顺序;
+    /// 相关度搜索:查询按空白分词(按小写去重),**全部词命中(正文或标题)
+    /// 才入选**(AND,零结果不回退 OR);整串连续出现(短语)总分 ×1.5。
+    /// 打分信号(降序,同分按文档顺序):
+    /// - 标题分级:标题==词 ×8 / 前缀 ×5 / 包含 ×2;
+    /// - 正文词频:每词 1+ln(加权词频);ASCII 字母数字词的整词出现
+    ///   (前后非字母数字)按双倍计,纯子串命中(如 "art" 命中 "start")单倍;
+    /// - 首现位置:越早越加分 1/(1+ln(1+首现字节偏移/文长));
+    /// - 密度归一:正文分除以 sqrt(文长/平均文长)(钳制 [0.5,4]),同频次短页优先。
+    /// 单词查询的命中文档集合与旧"整样子串匹配"完全一致,仅排序变化。
     /// `total` 为未应用 limit 截断前的总命中文档数。
     public func searchResults(_ query: String, limit: Int = 100) -> CHMSearchResults {
+        guard let parsed = Self.parseQuery(query) else { return CHMSearchResults(hits: [], total: 0) }
+        let scored = scoredDocuments(terms: parsed.terms, phrase: parsed.phrase)
+        return CHMSearchResults(hits: Array(scored.prefix(limit)).map(\.hit), total: scored.count)
+    }
+
+    // MARK: 相关度打分(查询期;索引不含分数,旧缓存直接兼容)
+
+    /// 查询词(原始大小写用于偏移回退重查;小写用于匹配)。
+    struct QueryTerm {
+        let raw: String
+        let lower: String
+    }
+
+    /// 单词在正文(textLower)中的扫描结果。
+    struct TermScan {
+        var count = 0
+        /// 整词出现次数(仅 ASCII 字母数字词统计,其余恒为 0)。
+        var wordCount = 0
+        /// 首现区间(摘要/偏移定位用)。
+        var firstRange: Range<String.Index>?
+    }
+
+    /// 带分数的命中(排序中间产物;测试/诊断观测口)。
+    struct ScoredHit {
+        let score: Double
+        let hit: CHMSearchHit
+    }
+
+    /// 查询解析:修剪、空白分词、按小写有序去重;空查询返回 nil。
+    static func parseQuery(_ query: String) -> (terms: [QueryTerm], phrase: String)? {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { return CHMSearchResults(hits: [], total: 0) }
-        let ql = q.lowercased()
-        // 每文档一个桶,并发搜索后按文档顺序合并(结果确定性;大书 ~4x 提速)
-        var titleBuckets = [[CHMSearchHit]](repeating: [], count: documents.count)
-        var bodyBuckets = [[CHMSearchHit]](repeating: [], count: documents.count)
-        DispatchQueue.concurrentPerform(iterations: documents.count) { i in
-            let doc = documents[i]
-            let titleHit = doc.titleLower.contains(ql)
-            let textRange = doc.textLower.range(of: ql)
-            guard titleHit || textRange != nil else { return }
-            let hit: CHMSearchHit
-            if let r = textRange {
-                // 小写化一般不改字符数,下标可直接对齐;不一致(如 İ)时回退原文重查
-                let offset: Int
-                if doc.text.count == doc.textLower.count {
-                    offset = doc.textLower.distance(from: doc.textLower.startIndex, to: r.lowerBound)
-                } else if let r2 = doc.text.range(of: q, options: .caseInsensitive) {
-                    offset = doc.text.distance(from: doc.text.startIndex, to: r2.lowerBound)
-                } else {
-                    return
-                }
-                hit = CHMSearchHit(
-                    path: doc.path,
-                    title: doc.title,
-                    snippet: CHMSnippet.around(offset, in: doc.text),
-                    offset: offset,
-                    isTitleMatch: titleHit
-                )
-            } else {
-                // 仅标题命中:摘要与偏移取自标题
-                let offset: Int
-                if doc.title.count == doc.titleLower.count,
-                   let r = doc.titleLower.range(of: ql) {
-                    offset = doc.titleLower.distance(from: doc.titleLower.startIndex, to: r.lowerBound)
-                } else if let r = doc.title.range(of: q, options: .caseInsensitive) {
-                    offset = doc.title.distance(from: doc.title.startIndex, to: r.lowerBound)
-                } else {
-                    offset = 0
-                }
-                hit = CHMSearchHit(
-                    path: doc.path,
-                    title: doc.title,
-                    snippet: CHMSnippet.around(offset, in: doc.title),
-                    offset: offset,
-                    isTitleMatch: true
-                )
-            }
-            if titleHit { titleBuckets[i] = [hit] } else { bodyBuckets[i] = [hit] }
+        guard !q.isEmpty else { return nil }
+        var terms: [QueryTerm] = []
+        var seen = Set<String>()
+        for part in q.split(whereSeparator: \.isWhitespace) {
+            let lower = String(part).lowercased()
+            guard seen.insert(lower).inserted else { continue }
+            terms.append(QueryTerm(raw: String(part), lower: lower))
         }
-        let all = titleBuckets.flatMap { $0 } + bodyBuckets.flatMap { $0 }
-        return CHMSearchResults(hits: Array(all.prefix(limit)), total: all.count)
+        guard !terms.isEmpty else { return nil }
+        return (terms, q.lowercased())
+    }
+
+    /// 打分并排序:(分数 desc, 文档顺序 asc);searchResults 与 scoredResults 共用。
+    /// 每文档独立打分,沿用并发结构;tf 计数为单调推进的 range 搜索,摊销 O(n)
+    /// (未命中文档成本与旧首现搜索相同)。
+    func scoredDocuments(terms: [QueryTerm], phrase: String) -> [ScoredHit] {
+        let avgLen = max(1.0, Double(documents.reduce(0) { $0 + $1.textLower.utf8.count })
+            / Double(max(documents.count, 1)))
+        var slots = [ScoredHit?](repeating: nil, count: documents.count)
+        DispatchQueue.concurrentPerform(iterations: documents.count) { i in
+            slots[i] = Self.scoreDocument(documents[i], terms: terms, phrase: phrase, avgLen: avgLen)
+        }
+        return slots.enumerated()
+            .compactMap { entry in entry.element.map { (index: entry.offset, scored: $0) } }
+            .sorted { $0.scored.score != $1.scored.score
+                ? $0.scored.score > $1.scored.score : $0.index < $1.index }
+            .map(\.scored)
+    }
+
+    /// 带分数的搜索结果(观测口:测试打印 top-N 与耗时)。
+    func scoredResults(_ query: String) -> [ScoredHit] {
+        guard let parsed = Self.parseQuery(query) else { return [] }
+        return scoredDocuments(terms: parsed.terms, phrase: parsed.phrase)
+    }
+
+    /// 单文档打分;任一词正文/标题均未命中 → nil(AND 排除)。
+    private static func scoreDocument(
+        _ doc: CHMSearchDocument, terms: [QueryTerm], phrase: String, avgLen: Double
+    ) -> ScoredHit? {
+        let byteLen = Double(doc.textLower.utf8.count)
+        var bodyScore = 0.0
+        var titleScore = 0.0
+        var anyTitle = false
+        var firstTitleOffset: Int?
+        var bodyScans: [(term: QueryTerm, scan: TermScan)] = []
+
+        for t in terms {
+            let scan = scanTerm(t.lower, in: doc.textLower,
+                                wordBoundary: isASCIIAlphanumeric(t.lower))
+            var grade = 0.0
+            if doc.titleLower == t.lower { grade = 8 }
+            else if doc.titleLower.hasPrefix(t.lower) { grade = 5 }
+            else if doc.titleLower.contains(t.lower) { grade = 2 }
+            if grade > 0 {
+                anyTitle = true
+                if firstTitleOffset == nil { firstTitleOffset = titleOffset(t, in: doc) }
+            }
+            titleScore += grade
+            if scan.count == 0 && grade == 0 { return nil }   // AND:缺一词即排除
+            if scan.count > 0 { bodyScans.append((t, scan)) }
+        }
+
+        for (t, scan) in bodyScans {
+            let weighted = isASCIIAlphanumeric(t.lower)
+                ? Double(scan.wordCount * 2 + (scan.count - scan.wordCount))
+                : Double(scan.count)
+            var s = 1.0 + log(weighted)
+            if let first = scan.firstRange, byteLen > 0 {
+                // 首现字节偏移(UTF8View.Index == String.Index,整数编码,O(1))
+                let byteOffset = doc.textLower.utf8.distance(
+                    from: doc.textLower.utf8.startIndex, to: first.lowerBound)
+                let x = Double(byteOffset) / byteLen
+                s += 1.0 / (1.0 + log(1.0 + x))
+            }
+            bodyScore += s
+        }
+        let ratio = min(16.0, max(0.25, byteLen / avgLen))
+        var score = bodyScore / sqrt(ratio) + titleScore
+        if terms.count > 1,
+           doc.textLower.contains(phrase) || doc.titleLower.contains(phrase) {
+            score *= 1.5   // 短语连续出现(整串含空格原样)
+        }
+
+        // 摘要与偏移:正文命中 → 最稀有正文词(同词频取词序靠前)首现;
+        // 全部词仅标题命中 → 首个标题命中词(与旧实现的标题摘要行为一致)
+        if let rarest = bodyScans.min(by: { $0.scan.count < $1.scan.count }) {
+            let offset = bodyOffset(rarest.term, rarest.scan, in: doc)
+            return ScoredHit(score: score, hit: CHMSearchHit(
+                path: doc.path, title: doc.title,
+                snippet: CHMSnippet.around(offset, in: doc.text),
+                offset: offset, isTitleMatch: anyTitle))
+        }
+        let offset = firstTitleOffset ?? 0
+        return ScoredHit(score: score, hit: CHMSearchHit(
+            path: doc.path, title: doc.title,
+            snippet: CHMSnippet.around(offset, in: doc.title),
+            offset: offset, isTitleMatch: true))
+    }
+
+    /// 单词出现计数:单调推进的 range 搜索(非重叠);wordBoundary 时逐现检查整词。
+    private static func scanTerm(
+        _ term: String, in haystack: String, wordBoundary: Bool
+    ) -> TermScan {
+        var scan = TermScan()
+        var search = haystack.startIndex..<haystack.endIndex
+        while let r = haystack.range(of: term, range: search) {
+            if scan.count == 0 { scan.firstRange = r }
+            scan.count += 1
+            if wordBoundary, isWordBounded(haystack, r) { scan.wordCount += 1 }
+            search = r.upperBound..<haystack.endIndex
+        }
+        return scan
+    }
+
+    /// 区间前后均为非字母数字(整词出现)。
+    private static func isWordBounded(_ s: String, _ r: Range<String.Index>) -> Bool {
+        if r.lowerBound > s.startIndex {
+            let prev = s[s.index(before: r.lowerBound)]
+            if prev.isLetter || prev.isNumber { return false }
+        }
+        if r.upperBound < s.endIndex {
+            let next = s[r.upperBound]
+            if next.isLetter || next.isNumber { return false }
+        }
+        return true
+    }
+
+    /// 纯 ASCII 字母数字(启用整词统计;CJK 词跳过)。
+    private static func isASCIIAlphanumeric(_ s: String) -> Bool {
+        !s.isEmpty && s.utf8.allSatisfy {
+            ($0 >= 0x41 && $0 <= 0x5A) || ($0 >= 0x61 && $0 <= 0x7A)
+                || ($0 >= 0x30 && $0 <= 0x39)
+        }
+    }
+
+    /// 正文首现的字符偏移:textLower 与 text 字符数一致时直接对齐;
+    /// 小写化改变字符数(如 İ)时回退原文大小写不敏感重查(与旧实现一致)。
+    private static func bodyOffset(
+        _ term: QueryTerm, _ scan: TermScan, in doc: CHMSearchDocument
+    ) -> Int {
+        if doc.text.count == doc.textLower.count, let first = scan.firstRange {
+            return doc.textLower.distance(from: doc.textLower.startIndex, to: first.lowerBound)
+        }
+        if let r = doc.text.range(of: term.raw, options: .caseInsensitive) {
+            return doc.text.distance(from: doc.text.startIndex, to: r.lowerBound)
+        }
+        return 0
+    }
+
+    /// 标题内首现偏移(对齐/回退规则同 bodyOffset)。
+    private static func titleOffset(_ term: QueryTerm, in doc: CHMSearchDocument) -> Int {
+        if doc.title.count == doc.titleLower.count,
+           let r = doc.titleLower.range(of: term.lower) {
+            return doc.titleLower.distance(from: doc.titleLower.startIndex, to: r.lowerBound)
+        }
+        if let r = doc.title.range(of: term.raw, options: .caseInsensitive) {
+            return doc.title.distance(from: doc.title.startIndex, to: r.lowerBound)
+        }
+        return 0
     }
 
     // MARK: - 缓存
@@ -524,9 +670,10 @@ public struct CHMSearchHit: Equatable, Sendable {
     public let path: String
     public let title: String
     public let snippet: String
-    /// 命中起点偏移:正文命中时为正文纯文本中的字符偏移;仅标题命中时为标题内偏移。
+    /// 命中起点偏移:正文命中时为正文纯文本中的字符偏移;仅标题命中时为标题内偏移
+    /// (多词查询时为所选摘要词的首现偏移)。
     public let offset: Int
-    /// 标题是否命中(标题命中的结果排在正文命中之前)。
+    /// 任一查询词命中标题即为 true(供 UI 展示标题命中标识)。
     public let isTitleMatch: Bool
 }
 
