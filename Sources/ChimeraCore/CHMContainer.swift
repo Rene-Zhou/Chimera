@@ -41,6 +41,14 @@ public final class CHMContainer {
     private let lock = NSLock()
     private var systemInfoCache: CHMSystemInfo?
     private var systemInfoLoaded = false
+    /// 仅供测试观测:实际调用 chm_resolve_object 的次数(条目查询缓存命中不计入)。
+    /// 用于验证缓存/单次 resolve 优化确实生效。
+    private(set) var resolveCount = 0
+    /// 条目查询缓存(归一化路径 → 条目)。容器不可变(文件只读打开),
+    /// 只增不失效;读写均在 lock 内。chmlib 目录匹配是大小写不敏感的
+    /// (strcasecmp),而本字典只做**精确匹配**命中:大小写变体路径 miss 后
+    /// 走 chm_resolve_object 兜底并回填,不敏感匹配的成败结果均保持不变。
+    private var entryCache: [String: CHMEntry] = [:]
 
     public init(path: String) throws {
         guard FileManager.default.fileExists(atPath: path) else {
@@ -110,6 +118,9 @@ public final class CHMContainer {
                 )
             }
         }
+        // 枚举结果即权威目录,顺手填充条目查询缓存:
+        // 之后所有 entry(at:)/read 均可零 resolve 命中(P0-3)
+        for e in entries { entryCache[e.path] = e }
         return entries
     }
 
@@ -125,22 +136,32 @@ public final class CHMContainer {
     private func entryUnlocked(at path: String) -> CHMEntry? {
         guard let handle else { return nil }
         let normalized = Self.normalize(path)
+        // 仅精确匹配命中(保持 chmlib 大小写不敏感语义不变);
+        // 变体/未见过路径走 resolve 兑底并回填
+        if let hit = entryCache[normalized] { return hit }
         var ui = chmUnitInfo()
+        resolveCount += 1
         guard chm_resolve_object(handle, normalized, &ui) == CHM_RESOLVE_SUCCESS else {
             return nil
         }
-        return CHMEntry(path: normalized, length: ui.length, isDirectory: normalized.hasSuffix("/"),
-                        space: UInt32(ui.space), start: ui.start)
+        let entry = CHMEntry(path: normalized, length: ui.length,
+                             isDirectory: normalized.hasSuffix("/"),
+                             space: UInt32(ui.space), start: ui.start)
+        entryCache[normalized] = entry
+        return entry
     }
 
     // MARK: - 读取
 
-    /// 整读一个条目。
+    /// 整读一个条目:单次 resolve(或缓存命中)后直接零 resolve 读取,
+    /// 不再经 read(_:,range:) 二次解析目录(P0-3)。
     public func read(_ path: String) throws -> Data {
-        guard let entry = entry(at: path) else {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let entry = entryUnlocked(at: path) else {
             throw CHMError.entryNotFound(path)
         }
-        return try read(path, range: 0..<entry.length)
+        return try readUnlocked(entry: entry, range: 0..<entry.length)
     }
 
     /// 零 resolve 读取:entry 必须来自本容器(allEntries()/entry(at:)),

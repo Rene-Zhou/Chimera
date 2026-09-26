@@ -122,3 +122,171 @@ func containerSetCacheBlockCountKeepsReadsCorrect() throws {
     c.setCacheBlockCount(0)
     _ = try c.read(entry: hhc)
 }
+
+// MARK: - 读取路径单次 resolve 与条目查询缓存(P0-3)
+// resolveCount 为测试观测口:仅统计真实 chm_resolve_object 调用,
+// 缓存命中/复用不计入。
+
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func containerRepeatedQueriesHitEntryCache() throws {
+    let c = try makeContainer()
+    _ = try c.allEntries()
+    // allEntries 内部 systemInfo() 会对 "/#SYSTEM" 做一次 resolve(lcid 探测所需,
+    // 先于枚举填充缓存),这是合法基线;后续重复精确查询不应再增加 resolve
+    let base = c.resolveCount
+    #expect(base <= 1, "枚举 + lcid 探测最多一次 resolve,实际 \(base) 次")
+
+    // 同一路径重复精确查询:应全部命中缓存,零 resolve
+    for _ in 0..<10 { _ = c.entry(at: "/$FIftiMain") }
+    #expect(c.resolveCount == base, "重复精确查询应命中枚举填充的缓存,实际多出 \(c.resolveCount - base) 次 resolve")
+
+    // 命中缓存的查询仍须返回正确条目(与首次解析一致)
+    let entry = try #require(c.entry(at: "/$FIftiMain"))
+    #expect(entry.length > 0)
+    #expect(entry.space == 0 || entry.space == 1)
+
+    // 不存在的路径仍干净返回 nil,且不污染缓存
+    #expect(c.entry(at: "/definitely/not/here.htm") == nil)
+    #expect(c.entry(at: "/$FIftiMain") != nil)
+}
+
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func containerReadByPathResolvesOnce() throws {
+    let c = try makeContainer()
+    let before = c.resolveCount
+    let hhc = try c.read("/DND五版不全书.hhc")
+    #expect(hhc.count > 0)
+    #expect(c.resolveCount - before == 1, "read(_:) 应单次 resolve,实际 \(c.resolveCount - before) 次")
+
+    // 再读一次:应命中条目缓存,零额外 resolve
+    _ = try c.read("/DND五版不全书.hhc")
+    #expect(c.resolveCount - before == 1, "重复 read(_:) 应命中缓存,实际 \(c.resolveCount - before) 次")
+
+    // 区间读同样受益
+    _ = try c.read("/$FIftiMain", range: 0..<64)
+    #expect(c.resolveCount - before == 2, "区间读新路径应仅一次 resolve,实际 \(c.resolveCount - before - 1) 次额外")
+}
+
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func containerCaseVariantPathResolvesViaFallback() throws {
+    let c = try makeContainer()
+    _ = try c.allEntries()
+    let base = c.resolveCount
+    let exact = try #require(c.entry(at: "/$FIftiMain"))
+    #expect(c.resolveCount == base, "精确匹配应命中缓存")
+
+    // 大小写变体:精确匹配 miss,走 chmlib 不敏感匹配 resolve 兑底
+    // (实测 chmlib 对 "/$FiFtImAiN" 可解析;对 "/$fiiftimain" 会因分支
+    //  路由按大小写敏感排序而误路由失败——两种结果都必须保持不变)
+    let variant = try #require(c.entry(at: "/$FiFtImAiN"), "可解析变体应经 chmlib 不敏感匹配解析")
+    #expect(c.resolveCount == base + 1, "变体首次解析应走一次 resolve 兑底")
+    #expect(variant.length == exact.length, "变体解析应指向同一实体")
+    #expect(variant.path == "/$FiFtImAiN", "返回条目保持请求路径(原语义)")
+
+    // 变体同样回填缓存:再次查询零 resolve
+    _ = c.entry(at: "/$FiFtImAiN")
+    #expect(c.resolveCount == base + 1, "变体回填缓存后不应重复 resolve")
+
+    // 变体读取与精确路径读取字节一致
+    let viaVariant = try c.read("/$FiFtImAiN", range: 0..<128)
+    let viaExact = try c.read("/$FIftiMain", range: 0..<128)
+    #expect(viaVariant == viaExact)
+
+    // chmlib 层面解析失败的变体:缓存后仍须返回 nil
+    // (缓存用精确键,不得“顺手”把不敏感匹配变成能力增强)
+    #expect(c.entry(at: "/$fiiftimain") == nil, "chmlib 路由失败的变体应保持 nil")
+}
+
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func containerRepeatedReadsMatchFirstResult() throws {
+    let c = try makeContainer()
+    let path = "/DND五版不全书.hhc"
+    let firstRead = try c.read(path)
+    let firstEntry = try #require(c.entry(at: path))
+
+    // 同一路径连续 read(_:)/entry(at:):缓存命中路径结果与首次完全一致
+    for _ in 0..<3 {
+        #expect(try c.read(path) == firstRead)
+        #expect(c.entry(at: path) == firstEntry)
+    }
+
+    // 大条目区间读同样稳定
+    let head = try c.read("/$FIftiMain", range: 0..<64)
+    for _ in 0..<3 {
+        #expect(try c.read("/$FIftiMain", range: 0..<64) == head)
+    }
+
+    // 缺前导斜杠的路径自动补全(归一化后同键,也应命中缓存)
+    let noSlash = try #require(c.entry(at: "$FIftiMain"))
+    #expect(noSlash.path == "/$FIftiMain")
+}
+
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func containerReadPathVsEntryBytesConsistentAfterCacheWarm() throws {
+    let c = try makeContainer()
+    let entries = try c.allEntries()
+    // 缓存已暖后 read(_:)(单次 resolve/缓存命中)与零 resolve 的 read(entry:) 字节一致
+    let sample = entries.filter {
+        !$0.isDirectory
+            && ($0.path.hasSuffix(".hhc") || $0.path.hasSuffix(".hhk")
+                || $0.path.hasSuffix(".htm") || $0.path.hasSuffix(".html"))
+    }.prefix(8)
+    #expect(sample.count > 0, "基准文件应含可采样页面")
+    for e in sample {
+        let viaPath = try c.read(e.path)
+        let viaEntry = try c.read(entry: e)
+        #expect(viaPath == viaEntry, "路径读取与零 resolve 读取应字节一致:\(e.path)")
+    }
+
+    // 大压缩条目区间读也一致
+    let fifti = try #require(entries.first { $0.path == "/$FIftiMain" })
+    let headPath = try c.read("/$FIftiMain", range: 0..<4096)
+    let headEntry = try c.read(entry: fifti, range: 0..<4096)
+    #expect(headPath == headEntry)
+}
+
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func containerSystemInfoUsesEntryCache() throws {
+    let c = try makeContainer()
+    // 先预热 /#SYSTEM 条目缓存(经 resolve 回填)
+    _ = c.entry(at: "/#SYSTEM")
+    let base = c.resolveCount
+    let warmed = try c.systemInfo()
+    #expect(c.resolveCount == base, "systemInfo 首次解析应命中条目缓存,实际多出 \(c.resolveCount - base) 次 resolve")
+
+    // 与冷缓存容器结果一致(正确性不受缓存影响)
+    let c2 = try makeContainer()
+    let cold = try c2.systemInfo()
+    #expect(warmed == cold, "缓存命中路径的 systemInfo 应与冷路径结果一致")
+    #expect(warmed != nil, "基准文件应含 /#SYSTEM")
+
+    // 重复调用 systemInfo() 结果稳定(自身缓存 + 条目缓存量重)
+    #expect(try c.systemInfo() == warmed)
+}
+
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func containerReadRangeOutOfBoundsStillThrowsReadFailed() throws {
+    let c = try makeContainer()
+    _ = try c.allEntries()
+    let length = try #require(c.entry(at: "/$FIftiMain")).length
+    // 错误语义保持:range 越界抛 readFailed(即使条目已命中缓存)
+    do {
+        _ = try c.read("/$FIftiMain", range: 0..<(length + 1))
+        Issue.record("越界区间应抛 readFailed")
+    } catch let e as CHMError {
+        guard case .readFailed = e else {
+            Issue.record("应为 readFailed,实际 \(e)"); return
+        }
+        #expect(Bool(true))
+    }
+    // 条目不存在语义保持:entryNotFound
+    do {
+        _ = try c.read("/ghost.htm")
+        Issue.record("缺失条目应抛 entryNotFound")
+    } catch let e as CHMError {
+        guard case .entryNotFound = e else {
+            Issue.record("应为 entryNotFound,实际 \(e)"); return
+        }
+        #expect(Bool(true))
+    }
+}
