@@ -57,8 +57,21 @@ struct SidebarView: View {
                         .padding(.bottom, 2)
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: 2) {
-                                ForEach(toc.map(TOCTreeNode.init)) { node in
-                                    TOCNodeView(node: node, model: model, depth: 0)
+                                // 扁平化 + 懒加载:只渲染可见行,"全部展开"也不会瞬间生成数千视图
+                                ForEach(TOCFlattener.flatten(toc, expanded: model.tocExpanded)) { row in
+                                    TOCRowView(
+                                        row: row,
+                                        expanded: model.tocExpanded.contains(row.id),
+                                        onToggle: { model.toggleTOCExpanded(row.id) },
+                                        onOpen: { local in
+                                            if NSEvent.modifierFlags.contains(.command) {
+                                                model.openInNewTab(local)
+                                            } else {
+                                                model.navigate(to: local)
+                                            }
+                                        },
+                                        onOpenInNewTab: { model.openInNewTab($0) }
+                                    )
                                 }
                             }
                             .padding(.vertical, 4)
@@ -213,83 +226,97 @@ struct SidebarView: View {
 
 // MARK: - 目录树
 
-/// 树节点包装:为 CHMTocItem 提供稳定 id 与可选子节点。
-struct TOCTreeNode: Identifiable {
+/// 扁平化后的可见目录行:只含已展开分支的可见节点。
+/// id 用索引路径("1.3.0")而非 标题+路径——基准书有大量同名同路径的
+/// 分隔符节点("————"→分隔符.htm),后者会产生重复 id 破坏 ForEach diff。
+struct TOCFlatRow: Identifiable {
+    let id: String
     let item: CHMTocItem
-    let children: [TOCTreeNode]?   // nil = 叶子
-
-    init(_ item: CHMTocItem) {
-        self.item = item
-        self.children = item.children.isEmpty ? nil : item.children.map(TOCTreeNode.init)
-    }
-
-    var id: String { (item.local ?? "") + "|" + item.title }
+    let depth: Int
+    let hasChildren: Bool
 }
 
-/// 递归目录行:箭头控制展开/收起(持久化),标题点击导航。
-struct TOCNodeView: View {
-    let node: TOCTreeNode
-    @ObservedObject var model: AppModel
-    let depth: Int
-
-    private var expanded: Bool { model.tocExpanded.contains(node.id) }
-
-    /// 点击=导航,⌘+点击=新标签页打开。
-    private func open(_ local: String) {
-        if NSEvent.modifierFlags.contains(.command) {
-            model.openInNewTab(local)
-        } else {
-            model.navigate(to: local)
+enum TOCFlattener {
+    /// 沿展开集合把树摊平成可见行;同时产出全部含子节点节点的 id(供"全部展开")。
+    static func flatten(_ items: [CHMTocItem], expanded: Set<String>) -> [TOCFlatRow] {
+        var rows: [TOCFlatRow] = []
+        func walk(_ items: [CHMTocItem], _ depth: Int, _ prefix: String) {
+            for (i, it) in items.enumerated() {
+                let id = prefix.isEmpty ? "\(i)" : "\(prefix).\(i)"
+                let has = !it.children.isEmpty
+                rows.append(TOCFlatRow(id: id, item: it, depth: depth, hasChildren: has))
+                if has, expanded.contains(id) { walk(it.children, depth + 1, id) }
+            }
         }
+        walk(items, 0, "")
+        return rows
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 4) {
-                if node.children != nil {
-                    Button { model.toggleTOCExpanded(node.id) } label: {
-                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .frame(width: 14, height: 14)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                } else {
-                    Spacer().frame(width: 14)
+    static func allParentIDs(_ items: [CHMTocItem]) -> Set<String> {
+        var ids: Set<String> = []
+        func walk(_ items: [CHMTocItem], _ prefix: String) {
+            for (i, it) in items.enumerated() {
+                let id = prefix.isEmpty ? "\(i)" : "\(prefix).\(i)"
+                if !it.children.isEmpty {
+                    ids.insert(id)
+                    walk(it.children, id)
                 }
-                // 行本体用 Button 而非 onTapGesture:窗口未激活时
-                // onTapGesture 的首次点击会被窗口激活吞掉,Button 可点击穿透
-                Button {
-                    if let local = node.item.local {
-                        open(local)
-                    } else if node.children != nil {
-                        // 纯文件夹节点:点标题只切换展开
-                        model.toggleTOCExpanded(node.id)
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Text(node.item.title)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                        Spacer(minLength: 0)
-                    }
-                    .contentShape(Rectangle())
+            }
+        }
+        walk(items, "")
+        return ids
+    }
+}
+
+/// 单行目录:箭头=展开/收起,标题=导航(⌘+点击=新标签)。
+/// 纯值类型 + 闭包,不观察 AppModel——避免模型任何变动都重渲染数千行。
+struct TOCRowView: View {
+    let row: TOCFlatRow
+    let expanded: Bool
+    let onToggle: () -> Void
+    let onOpen: (String) -> Void
+    let onOpenInNewTab: (String) -> Void
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if row.hasChildren {
+                Button(action: onToggle) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 14, height: 14)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(.primary)
+            } else {
+                Spacer().frame(width: 14)
             }
-            .padding(.leading, CGFloat(depth) * 14)
-            .padding(.vertical, 2)
-            .contextMenu {
-                if let local = node.item.local {
-                    Button("在新标签页打开") { model.openInNewTab(local) }
+            // 行本体用 Button 而非 onTapGesture:窗口未激活时
+            // onTapGesture 的首次点击会被窗口激活吞掉,Button 可点击穿透
+            Button {
+                if let local = row.item.local {
+                    onOpen(local)
+                } else if row.hasChildren {
+                    // 纯文件夹节点:点标题只切换展开
+                    onToggle()
                 }
+            } label: {
+                HStack(spacing: 4) {
+                    Text(row.item.title)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
             }
-            if expanded, let children = node.children {
-                ForEach(children) { child in
-                    TOCNodeView(node: child, model: model, depth: depth + 1)
-                }
+            .buttonStyle(.plain)
+            .foregroundStyle(.primary)
+        }
+        .padding(.leading, CGFloat(row.depth) * 14)
+        .padding(.vertical, 2)
+        .contextMenu {
+            if let local = row.item.local {
+                Button("在新标签页打开") { onOpenInNewTab(local) }
             }
         }
     }

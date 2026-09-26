@@ -328,14 +328,7 @@ final class AppModel: ObservableObject {
     /// 全部展开(仅含子节点的目录项参与展开集合)。
     func expandAllTOC() {
         guard let doc = document else { return }
-        var ids: Set<String> = []
-        func walk(_ items: [CHMTocItem]) {
-            for it in items where !it.children.isEmpty {
-                ids.insert(TOCTreeNode(it).id)
-                walk(it.children)
-            }
-        }
-        walk(doc.toc)
+        let ids = TOCFlattener.allParentIDs(doc.toc)
         tocExpanded = ids
         tocExpansionStore?.save(ids)
     }
