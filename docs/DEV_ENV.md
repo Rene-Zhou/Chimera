@@ -50,3 +50,17 @@ swift test -Xswiftc -plugin-path \
   须拆成字面量分支或显式 `LocalizedStringKey(...)`。
 - 打包后自检:`CHIMERA_L10N_PROBE=1 Chimera.app/Contents/MacOS/Chimera -AppleLanguages "(en)"`
   (注意必须数组语法,裸 `-AppleLanguages en` 无效)打印关键键的解析结果。
+
+## LaunchServices 卫生(血泪教训)
+
+- **任何调试/实验 .app 不得声明 `CFBundleDocumentTypes`/`UTImportedTypeDeclarations`,
+  也不得复用正式 bundle id**(`io.github.rene.chimera`)。2026-09 曾因此翻车:
+  一个 /tmp 下的二分实验包声明了 .chm 后被删除,残留注册记录把 .chm 扩展名
+  劫持到幽灵 UTI,导致正式 app 在"打开方式"中消失(`urlsForApplications` 返回空)。
+- 症状排查:`lsregister -dump | grep -B12 'identifier:.*io.github.rene.chimera'`
+  看有多少个注册副本;`swift -e 'import UniformTypeIdentifiers; print(UTType(filenameExtension:"chm")!)'`
+  看扩展名映射到哪个 UTI。
+- 清理:能找到路径的用 `lsregister -u <path>`;文件已删的幽灵记录,在同路径重建
+  一个不含文档类型声明的同名包,`lsregister -f` 覆盖后再 `-u`。
+- 调试包正确做法:换 bundle id(如 `io.github.rene.chimera.debug`)且 Info.plist
+  不带文档类型声明;冒烟脚本 `scripts/smoke.sh` 跑的是裸二进制,本来就不注册。
