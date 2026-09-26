@@ -21,6 +21,27 @@ import Foundation
     #expect(!plain.contains("\u{00A0}"), "实体解码后空白应折叠")
 }
 
+@Test func plainTextHandlesMultiScriptStyleAndEntityLiteral() {
+    // 多 script/style 块(含大写开标签)+ 不闭合 script + 文本内 &lt;script&gt; 字面量:
+    // 实体解码在标签移除之后,解出的 "<script>" 是文本,不得再按块剥离
+    let html = """
+    <html><head><style>.a{color:red}</style><STYLE>.b{font:2px}</STYLE></head>
+    <body>
+    <p>实体 &lt;script&gt; 保持为文本</p>
+    <script type="text/javascript">var x=1;</script>
+    <p>第二段</p>
+    <style>body{margin:0}</style>
+    <script>var y=2;
+    <p>被丢弃</p></body></html>
+    """
+    let plain = CHMTextExtractor.plainText(from: html)
+    #expect(plain == "实体 <script> 保持为文本 第二段")
+    #expect(!plain.contains("color:red") && !plain.contains("font:2px")
+            && !plain.contains("margin:0"), "style 块应整体移除")
+    #expect(!plain.contains("var x") && !plain.contains("var y"), "script 内容应移除")
+    #expect(!plain.contains("被丢弃"), "不闭合 script 之后的内容应一并丢弃")
+}
+
 // MARK: - 摘要
 
 @Test func snippetAroundHit() {
@@ -37,6 +58,36 @@ import Foundation
 }
 
 // MARK: - 搜索
+
+@Test func snippetWindowsOnVeryLongText() {
+    // >100k 字符长文本:窗口定位不得依赖整页拷贝;头/中/尾三处偏移逐一验证
+    let prefix = String(repeating: "甲", count: 100_000)
+    let suffix = String(repeating: "乙", count: 100_000)
+    let text = prefix + "目标" + suffix
+    let markerOffset = 100_000 // "目" 的字符偏移
+
+    // 头部:无前省略号,窗口 [0, 2r)
+    let head = CHMSnippet.around(0, in: text, radius: 10)
+    #expect(head == String(repeating: "甲", count: 20) + "…")
+
+    // 中部:双侧省略号,窗口 [o-r, o+2r) = 10 甲 + 目标 + 18 乙
+    let mid = CHMSnippet.around(markerOffset, in: text, radius: 10)
+    #expect(mid == "…" + String(repeating: "甲", count: 10) + "目标"
+        + String(repeating: "乙", count: 18) + "…")
+    #expect(mid.count <= 3 * 10 + 2, "摘要长度应受窗口上限约束")
+
+    // 尾部:无后省略号;越界偏移钳制到最后一字符
+    let tail = CHMSnippet.around(text.count - 1, in: text, radius: 10)
+    #expect(tail == "…" + String(repeating: "乙", count: 11))
+    #expect(CHMSnippet.around(text.count + 500, in: text, radius: 10) == tail)
+
+    // 长文本中混排空白:换行/回车折叠为空格,连续空格合并为一个
+    let messy = String(repeating: "丙", count: 200_000) + "A  B\nC\r D"
+        + String(repeating: "丁", count: 200_000)
+    let m = CHMSnippet.around(200_002, in: messy, radius: 12)
+    #expect(m.contains("A B C D"))
+    #expect(!m.contains("  ") && !m.contains("\n") && !m.contains("\r"))
+}
 
 @Test func searchFindsDocuments() {
     let docs = [
@@ -138,6 +189,76 @@ func buildWithProvidedEntriesMatchesSubset() throws {
     #expect(!idx.documents.isEmpty)
     #expect(idx.documents.allSatisfy { subsetPaths.contains($0.path) },
             "entries 重载不应索引子集之外的页面")
+}
+
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func buildSortedByPhysicalOffsetMatchesLegacyDocumentSet() throws {
+    // P0-4 验收:entries 重载按物理偏移排序后,产出文档集合与旧签名一致(仅顺序不同)
+    let c = try CHMContainer(path: benchmarkCHMPath)
+    let all = try c.allEntries()
+    let legacy = try CHMSearchIndex.build(container: c)
+    let provided = try CHMSearchIndex.build(container: c, entries: all)
+    #expect(Set(legacy.documents.map(\.path)) == Set(provided.documents.map(\.path)),
+            "排序读取不应改变索引的文档集合")
+    #expect(legacy.documents.count == provided.documents.count)
+
+    // 文档应按条目 start 升序排列(与 allEntries 的目录序不同)
+    let startByPath = Dictionary(all.map { ($0.path, $0.start) },
+                                 uniquingKeysWith: { a, _ in a })
+    let starts = provided.documents.compactMap { startByPath[$0.path] }
+    #expect(starts.count == provided.documents.count)
+    #expect(starts == starts.sorted(), "documents 应按物理偏移升序排列")
+}
+
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func buildCountsFailedPagesWithoutAborting() throws {
+    // P2-12 验收:伪造条目(未压缩空间 + 超出文件尾的 start)读取必抛错;
+    // 构建应记录失败页并继续完成其余页面
+    let c = try CHMContainer(path: benchmarkCHMPath)
+    let html = try c.allEntries().filter {
+        !$0.isDirectory && ["htm", "html"].contains(($0.path as NSString).pathExtension.lowercased())
+    }
+    let real = Array(html.prefix(5))
+    let ghost = CHMEntry(path: "/__ghost__.htm", length: 16, isDirectory: false,
+                         space: 0, start: UInt64(1) << 40)
+    var failed: [String] = []
+    let idx = try CHMSearchIndex.build(container: c, entries: real + [ghost]) { path in
+        failed.append(path)
+    }
+    #expect(failed == ["/__ghost__.htm"], "失败页应恰好被计数一次,实际 \(failed)")
+    #expect(!idx.documents.contains { $0.path == "/__ghost__.htm" }, "失败页不得进入索引")
+    #expect(!idx.documents.isEmpty, "其余页面应正常构建,不得中断")
+
+    let clean = try CHMSearchIndex.build(container: c, entries: real)
+    #expect(Set(idx.documents.map(\.path)) == Set(clean.documents.map(\.path)),
+            "混入失败页不应影响其余文档产出")
+}
+
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func benchmarkSortedVsDirectoryOrderReads() throws {
+    // P0-4 诊断基准(仅打印,不作硬断言):同样的页面集合,
+    // 目录序 + 默认块缓存 + 按路径读取 vs 物理序 + 128 块缓存 + 零 resolve 读取
+    let c = try CHMContainer(path: benchmarkCHMPath)
+    let html = try c.allEntries().filter {
+        !$0.isDirectory && ["htm", "html"].contains(($0.path as NSString).pathExtension.lowercased())
+    }
+
+    var t = Date()
+    var bytes = 0
+    for e in html { bytes += (try? c.read(e.path))?.count ?? 0 }
+    let legacy = Date().timeIntervalSince(t)
+
+    let sorted = html.sorted { $0.start != $1.start ? $0.start < $1.start : $0.path < $1.path }
+    let c2 = try CHMContainer(path: benchmarkCHMPath)
+    c2.setCacheBlockCount(128)
+    t = Date()
+    var bytes2 = 0
+    for e in sorted { bytes2 += (try? c2.read(entry: e))?.count ?? 0 }
+    let physical = Date().timeIntervalSince(t)
+
+    #expect(bytes == bytes2, "两种读取方式总字节应一致")
+    print("BENCH reads \(html.count) pages: directory-order \(String(format: "%.2f", legacy))s "
+        + "vs physical-order+cache128 \(String(format: "%.2f", physical))s")
 }
 
 @Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))

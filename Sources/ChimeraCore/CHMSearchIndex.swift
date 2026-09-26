@@ -20,50 +20,259 @@ public enum CHMTextExtractor {
     }
 
     /// HTML → 纯文本:移除 script/style 块,标签转空白,实体解码,空白折叠。
+    /// 两趟 UTF-8 字节扫描(P1-9):第一趟块跳过+标签→空格,第二趟实体解码+空白折叠;
+    /// 逐字节而非逐 Character——debug 构建下字素级迭代每字符代价高一个量级,
+    /// 且旧实现的 removeSubrange/多次全文拷贝在多块页面上是 O(n·k)。
     public static func plainText(from html: String) -> String {
-        var s = html
-        for tag in ["script", "style"] {
-            while let open = s.range(of: "<\(tag)", options: .caseInsensitive) {
-                guard let close = s.range(of: "</\(tag)>", options: .caseInsensitive,
-                                          range: open.upperBound..<s.endIndex) else {
-                    s.removeSubrange(open.lowerBound..<s.endIndex)
-                    break
-                }
-                s.removeSubrange(open.lowerBound..<close.upperBound)
-            }
+        // 附带修复:decode 产出的页可能桥接自 NSString(逐字符访问慢近一个量级),
+        // 先物化为连续 UTF-8 的 native 串(已是 native 时零拷贝)
+        let source: String
+        if html.utf8.withContiguousStorageIfAvailable({ _ in true }) == true {
+            source = html
+        } else {
+            source = String(decoding: html.utf8, as: UTF8.self)
         }
+        let bytes = Array(source.utf8)
+        let n = bytes.count
 
-        var out = ""
-        out.reserveCapacity(s.count)
+        // ===== 第一趟:script/style 区间整体跳过(含未闭合:丢弃至串尾,与旧实现一致);
+        // 其余标签 → 空格(裸 ">" 丢弃);文本字节透传。
+        // UTF-8 下 0x3C("<")/0x3E(">") 只能是独立 ASCII 字节,逐字节判断安全。
+        // 预分配 + 写指针:避免逐字节 append 的容量检查/函数调用开销
+        var stripped = [UInt8](repeating: 0, count: n)
+        var w = 0
+        var i = 0
         var inTag = false
-        for ch in s {
-            if ch == "<" {
+        while i < n {
+            let b = bytes[i]
+            if b == 0x3C {
+                // 快速排除:script/style 开标签的第二个字节必为 's'/'S'
+                let next = i + 1 < n ? bytes[i + 1] : 0
+                if (next == 0x73 || next == 0x53), let tag = matchScriptStyleOpen(bytes, at: i) {
+                    // 前缀匹配与旧实现 range(of: "<script") 一致(其后字符任意)
+                    if let closeEnd = findCloseTag(bytes, from: i + 1, tag: tag) {
+                        i = closeEnd
+                    } else {
+                        i = n // 未闭合块:移除到末尾
+                    }
+                    continue
+                }
+                stripped[w] = 0x20
+                w += 1
                 inTag = true
-                out.append(" ")
-            } else if ch == ">" {
+            } else if b == 0x3E {
                 inTag = false
             } else if !inTag {
-                out.append(ch)
+                stripped[w] = b
+                w += 1
             }
+            i += 1
         }
 
-        let decoded = CHMSitemapParser.decodeEntities(out)
-        var collapsed = ""
-        collapsed.reserveCapacity(decoded.count)
+        // ===== 第二趟:实体解码 + 空白折叠(逐字语义与旧 decodeEntities→折叠链一致;
+        // 解码在标签移除之后,`&lt;script&gt;` 解出的 "<script>" 是文本,不再按块处理)
+        var out = [UInt8](repeating: 0, count: w)
+        var ow = 0
+        let m = w
+        var j = 0
         var lastWasSpace = true
-        for ch in decoded {
-            if ch.isWhitespace {
-                if !lastWasSpace {
-                    collapsed.append(" ")
-                    lastWasSpace = true
+        while j < m {
+            let b = stripped[j]
+            if b == 0x26 { // '&':复刻 decodeEntities,向后 11 字节内找 ';',实体名 ≤ 10 字节
+                var name = [UInt8]()
+                name.reserveCapacity(11)
+                var k = j + 1
+                var semi = -1
+                while k <= min(j + 11, m - 1) {
+                    let c = stripped[k]
+                    if c == 0x3B { semi = k; break }
+                    name.append(asciiLower(c))
+                    k += 1
                 }
+                if semi >= 0, let scalar = Self.decodeEntity(name) {
+                    // 有效实体:输出解码标量(空白则参与折叠),跳过 ';'
+                    emitScalar(scalar, to: &out, write: &ow, lastWasSpace: &lastWasSpace)
+                    j = semi + 1
+                    continue
+                }
+                // 非法/超长实体: '&' 作普通字节输出,后续字节正常处理(与旧实现一致)
+            }
+            if b < 0x80 {
+                // ASCII:仅 0x09-0x0D 与 0x20 是空白
+                if b == 0x20 || (b >= 0x09 && b <= 0x0D) {
+                    if !lastWasSpace {
+                        out[ow] = 0x20
+                        ow += 1
+                        lastWasSpace = true
+                    }
+                } else {
+                    out[ow] = b
+                    ow += 1
+                    lastWasSpace = false
+                }
+                j += 1
             } else {
-                collapsed.append(ch)
-                lastWasSpace = false
+                // 多字节标量:空白标量的 UTF-8 前导字节仅 C2/E1/E2/E3,
+                // 其余(如 CJK E4-E9)直接透传整个标量(内联判定,避免每标量函数调用)
+                let len = utf8ScalarLength(lead: b)
+                var isWS = false
+                if b == 0xC2 || b == 0xE1 || b == 0xE2 || b == 0xE3 {
+                    // 手动解码标量(while 循环,避免 Range 迭代器的泛型开销)
+                    var v: UInt32 = UInt32(b & 0x0F)
+                    var q = 1
+                    while q < len {
+                        v = (v << 6) | UInt32(stripped[j + q] & 0x3F)
+                        q += 1
+                    }
+                    switch v {
+                    case 0x85, 0xA0, 0x1680, 0x2000...0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000:
+                        isWS = true
+                    default:
+                        break
+                    }
+                }
+                if isWS {
+                    if !lastWasSpace {
+                        out[ow] = 0x20
+                        ow += 1
+                        lastWasSpace = true
+                    }
+                } else {
+                    var q = 0
+                    while q < len {
+                        out[ow + q] = stripped[j + q]
+                        q += 1
+                    }
+                    ow += len
+                    lastWasSpace = false
+                }
+                j += len
             }
         }
-        if collapsed.hasSuffix(" ") { collapsed.removeLast() }
-        return collapsed
+        if lastWasSpace && ow > 0 { ow -= 1 }
+        return String(decoding: out[0..<ow], as: UTF8.self)
+    }
+
+    /// 实体名(已小写化字节)→ 标量;无效返回 nil。
+    /// 语义与 CHMSitemapParser.decodeEntities 一致:十进制/十六进制 + 常用具名实体。
+    private static func decodeEntity(_ name: [UInt8]) -> UInt32? {
+        if name.count >= 2, name[0] == 0x23 { // '#'
+            let digits: [UInt8] = name[1] == 0x78 ? Array(name[2...]) : Array(name[1...])
+            guard !digits.isEmpty else { return nil }
+            let s = String(decoding: digits, as: UTF8.self)
+            if name[1] == 0x78 { return UInt32(s, radix: 16) }
+            return UInt32(s)
+        }
+        switch String(decoding: name, as: UTF8.self) {
+        case "amp": return 0x26
+        case "lt": return 0x3C
+        case "gt": return 0x3E
+        case "quot": return 0x22
+        case "apos": return 0x27
+        case "nbsp": return 0xA0
+        default: return nil
+        }
+    }
+
+    /// 标量经空白判断输出:空白折叠为单个空格,否则追加 UTF-8 编码(写指针式)。
+    private static func emitScalar(_ value: UInt32, to out: inout [UInt8],
+                                   write ow: inout Int, lastWasSpace: inout Bool) {
+        // Unicode 空白标量全集(与旧 Character.isWhitespace 判定一致)
+        let isWS: Bool
+        switch value {
+        case 0x09...0x0D, 0x20, 0x85, 0xA0, 0x1680, 0x2000...0x200A,
+             0x2028, 0x2029, 0x202F, 0x205F, 0x3000:
+            isWS = true
+        default:
+            isWS = false
+        }
+        if isWS {
+            if !lastWasSpace {
+                out[ow] = 0x20
+                ow += 1
+                lastWasSpace = true
+            }
+        } else {
+            if value < 0x80 {
+                out[ow] = UInt8(value)
+                ow += 1
+            } else if value < 0x800 {
+                out[ow] = UInt8(0xC0 | (value >> 6))
+                out[ow + 1] = UInt8(0x80 | (value & 0x3F))
+                ow += 2
+            } else if value < 0x10000 {
+                out[ow] = UInt8(0xE0 | (value >> 12))
+                out[ow + 1] = UInt8(0x80 | ((value >> 6) & 0x3F))
+                out[ow + 2] = UInt8(0x80 | (value & 0x3F))
+                ow += 3
+            } else {
+                out[ow] = UInt8(0xF0 | (value >> 18))
+                out[ow + 1] = UInt8(0x80 | ((value >> 12) & 0x3F))
+                out[ow + 2] = UInt8(0x80 | ((value >> 6) & 0x3F))
+                out[ow + 3] = UInt8(0x80 | (value & 0x3F))
+                ow += 4
+            }
+            lastWasSpace = false
+        }
+    }
+
+    private static func asciiLower(_ b: UInt8) -> UInt8 {
+        (b >= 0x41 && b <= 0x5A) ? b + 0x20 : b
+    }
+
+    /// UTF-8 前导字节 → 标量字节长度(输入来自合法 String,无非法序列)。
+    private static func utf8ScalarLength(lead: UInt8) -> Int {
+        if lead >= 0xF0 { return 4 }
+        if lead >= 0xE0 { return 3 }
+        return 2
+    }
+
+    /// bytes[i] == '<' 处是否紧跟 script/style(ASCII 大小写不敏感前缀匹配)。
+    /// 返回对应闭标签模式(nil = 非块开标签)。模式均为静态常量,调用零分配。
+    private static let scriptOpen: [UInt8] = [0x73, 0x63, 0x72, 0x69, 0x70, 0x74] // "script"
+    private static let styleOpen: [UInt8] = [0x73, 0x74, 0x79, 0x6C, 0x65]       // "style"
+    private static let closeScriptTag: [UInt8] = Array("</script>".utf8)
+    private static let closeStyleTag: [UInt8] = Array("</style>".utf8)
+
+    private static func matchScriptStyleOpen(_ bytes: [UInt8], at i: Int) -> [UInt8]? {
+        if matchesASCII(bytes, at: i + 1, scriptOpen) { return closeScriptTag }
+        if matchesASCII(bytes, at: i + 1, styleOpen) { return closeStyleTag }
+        return nil
+    }
+
+    /// bytes[start...] 是否与 tag(小写 ASCII)逐字节匹配(大小写不敏感)。
+    private static func matchesASCII(_ bytes: [UInt8], at start: Int, _ tag: [UInt8]) -> Bool {
+        var k = start
+        var t = 0
+        while t < tag.count {
+            if k >= bytes.count || !asciiEqByte(bytes[k], tag[t]) { return false }
+            k += 1
+            t += 1
+        }
+        return true
+    }
+
+    private static func asciiEqByte(_ b: UInt8, _ lower: UInt8) -> Bool {
+        b == lower || (b >= 0x41 && b <= 0x5A && b + 0x20 == lower)
+    }
+
+    private static func findCloseTag(_ bytes: [UInt8], from: Int, tag close: [UInt8]) -> Int? {
+        let n = bytes.count
+        let len = close.count
+        var i = from
+        while i + len <= n {
+            if bytes[i] == 0x3C {
+                var ok = true
+                var k = 0
+                while k < len {
+                    if !asciiEqByte(bytes[i + k], close[k]) { ok = false; break }
+                    k += 1
+                }
+                if ok { return i + len }
+            }
+            i += 1
+        }
+        return nil
     }
 }
 
@@ -72,19 +281,37 @@ public enum CHMTextExtractor {
 /// 命中上下文摘要。
 public enum CHMSnippet {
     /// text 中 offset 处 ±radius 字符窗口;截断侧以 "…" 标记;折叠换行。
+    /// 直接用 String.Index 定位窗口边界(P1-7),不再 `Array(text)` 整页拷贝;
+    /// 换行折叠与连续空格合并为单趟扫描。
     public static func around(_ offset: Int, in text: String, radius: Int = 40) -> String {
-        let chars = Array(text)
-        guard !chars.isEmpty else { return "" }
-        let clamped = min(max(offset, 0), chars.count - 1)
+        guard !text.isEmpty else { return "" }
+        let count = text.count
+        let clamped = min(max(offset, 0), count - 1)
         let start = max(0, clamped - radius)
-        let end = min(chars.count, clamped + 2 * radius)
-        var s = String(chars[start..<end])
+        let end = min(count, clamped + 2 * radius)
+        let startIdx = text.index(text.startIndex, offsetBy: start)
+        let endIdx = text.index(startIdx, offsetBy: end - start)
+        var s = String(text[startIdx..<endIdx])
         if start > 0 { s = "…" + s }
-        if end < chars.count { s += "…" }
-        s = s.replacingOccurrences(of: "\n", with: " ")
-        s = s.replacingOccurrences(of: "\r", with: " ")
-        while s.contains("  ") { s = s.replacingOccurrences(of: "  ", with: " ") }
-        return s
+        if end < count { s += "…" }
+
+        // 单趟:\n/\r → 空格,连续空格(含替换产物)合并为一个;
+        // 制表符等其他空白与旧行为一致:不替换、不折叠
+        var out = ""
+        out.reserveCapacity(s.count)
+        var lastWasSpace = false
+        for ch in s {
+            if ch == " " || ch == "\n" || ch == "\r" {
+                if !lastWasSpace {
+                    out.append(" ")
+                    lastWasSpace = true
+                }
+            } else {
+                out.append(ch)
+                lastWasSpace = false
+            }
+        }
+        return out
     }
 }
 
@@ -147,22 +374,36 @@ public struct CHMSearchIndex: Codable {
 
     /// 同上,但接收调用方已枚举的条目(allEntries() 结果)以复用枚举。
     /// 内部自行过滤 .htm/.html 非目录条目。
+    /// - Parameters:
+    ///   - onReadFailure: 读取失败页回调(路径);失败页被计数并汇总打印,不中断构建
     public static func build(
         container: CHMContainer,
         entries: [CHMEntry],
         tocTitles: [String: String] = [:],
-        progress: ((Int, Int) -> Void)? = nil
+        progress: ((Int, Int) -> Void)? = nil,
+        onReadFailure: ((String) -> Void)? = nil
     ) throws -> CHMSearchIndex {
         let info = try container.systemInfo()
-        let htmlEntries = entries.filter { entry in
-            !entry.isDirectory
-                && ["htm", "html"].contains((entry.path as NSString).pathExtension.lowercased())
-        }
+        let htmlEntries = entries
+            .filter { entry in
+                !entry.isDirectory
+                    && ["htm", "html"].contains((entry.path as NSString).pathExtension.lowercased())
+            }
+            // P0-4:按数据区物理偏移升序读取。LZX 解压有状态,目录序随机访问会
+            // 反复重解压自上次 reset 以来的全部块;物理序访问近乎顺序,几乎零重解压。
+            // 同偏移按路径排序保证结果确定性。注意:documents 顺序随之变为物理序,
+            // 搜索同分结果的文档序排列随之变化(可接受的行为变化)。
+            .sorted { $0.start != $1.start ? $0.start < $1.start : $0.path < $1.path }
+        // P0-4:调大 LZX 块缓存(默认仅 5×32KB;128 块 ≈ 4MB,显著减少重复解压)
+        container.setCacheBlockCount(128)
 
         var docs: [CHMSearchDocument] = []
         docs.reserveCapacity(htmlEntries.count)
+        var failedPaths: [String] = []
         for (i, entry) in htmlEntries.enumerated() {
-            if let data = try? container.read(entry.path) {
+            do {
+                // P0-4:零 resolve 读取,免每次读取的目录页查找
+                let data = try container.read(entry: entry)
                 let html = CHMTextDecoder.decode(data, lcid: info?.lcid)
                 let bare = String(entry.path.dropFirst())
                 let title = tocTitles[entry.path] ?? tocTitles[bare]
@@ -171,8 +412,18 @@ public struct CHMSearchIndex: Codable {
                 if !text.isEmpty {
                     docs.append(CHMSearchDocument(path: entry.path, title: title, text: text))
                 }
+            } catch {
+                // P2-12:记录失败页并回调,不再无声跳过
+                failedPaths.append(entry.path)
+                onReadFailure?(entry.path)
             }
             progress?(i + 1, htmlEntries.count)
+        }
+        if !failedPaths.isEmpty {
+            let sample = failedPaths.prefix(5).joined(separator: ", ")
+            let more = failedPaths.count > 5 ? ", …" : ""
+            print("index build: \(failedPaths.count)/\(htmlEntries.count) pages failed: "
+                + "[\(sample)\(more)]")
         }
         return CHMSearchIndex(documents: docs)
     }
