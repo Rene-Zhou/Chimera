@@ -279,82 +279,116 @@ import Foundation
     }
 }
 
-// MARK: - 小标题(h1~h6)抽取与加权
+// MARK: - 小标题(h1~h6)抽取与加权(按单条标题)
 
-@Test func headingTextExtractsH1ToH6() {
-    // 基本:h1~h6 全档、大小写不敏感、内层标签→空格、片段空格拼接
+@Test func headingsExtractH1ToH6() {
+    // 基本:h1~h6 全档、大小写不敏感、内层标签→空格、每条标题独立成元素
     let html = """
     <html><head><title>页题</title></head>
     <body><h1>第一章</h1><p>正文一</p>
     <H2>火球 <b>术</b>的说明</H2><p>正文二</p>
     <h3>附注</h3></body></html>
     """
-    #expect(CHMTextExtractor.headingText(from: html) == "第一章 火球 术 的说明 附注")
+    #expect(CHMTextExtractor.headings(from: html)
+        == ["第一章", "火球 术 的说明", "附注"])
 }
 
-@Test func headingTextHandlesUnclosedAndSkipsNonHeadingTags() {
+@Test func headingsHandleUnclosedAndSkipNonHeadingTags() {
     // 不闭合:取到下一个标题开标签;head/hr/h7 不算标题
     let unclosed = "<h2>未闭合<h3>第二个</h3>尾部<h4>第三</h4>"
-    #expect(CHMTextExtractor.headingText(from: unclosed) == "未闭合 第二个 第三")
+    #expect(CHMTextExtractor.headings(from: unclosed) == ["未闭合", "第二个", "第三"])
     let nonHeading = "<html><head><meta></head><body><hr><h7>伪标题</h7><h2>真标题</h2></body></html>"
-    #expect(CHMTextExtractor.headingText(from: nonHeading) == "真标题")
-    // 无标题 → 空串
-    #expect(CHMTextExtractor.headingText(from: "<p>没有标题的正文</p>") == "")
+    #expect(CHMTextExtractor.headings(from: nonHeading) == ["真标题"])
+    // 无标题 → 空数组
+    #expect(CHMTextExtractor.headings(from: "<p>没有标题的正文</p>") == [])
     // 自闭合 <h2/> 不吞噬后续内容
     let selfClosed = "<h2/><p>正文</p><h3>真标题</h3>"
-    #expect(CHMTextExtractor.headingText(from: selfClosed) == "真标题")
+    #expect(CHMTextExtractor.headings(from: selfClosed) == ["真标题"])
 }
 
 @Test func searchHeadingMatchOutranksBodyMention() throws {
-    // 小标题命中(×3)应胜过正文单次提及(≈1.8);摘要取自小标题;isTitleMatch 为假
+    // 单条小标题包含命中(×3)应胜过正文单次提及(≈1.8);摘要取自命中的那条标题
     let docs = [
         CHMSearchDocument(path: "/body.htm", title: "T", text: "介绍与火球的正文内容"),
         CHMSearchDocument(path: "/heading.htm", title: "T", text: "介绍与说明的正文内容",
-                          headings: "火球术 施法者指南"),
+                          headings: ["火球术 施法者指南"]),
     ]
     let idx = CHMSearchIndex(documents: docs)
     let first = try #require(idx.searchResults("火球").hits.first)
     #expect(first.path == "/heading.htm")
-    #expect(first.snippet.contains("火球术"), "仅小标题命中时摘要取自小标题")
+    #expect(first.snippet.contains("火球术"), "仅小标题命中时摘要取自命中标题")
     #expect(!first.isTitleMatch)
 }
 
 @Test func searchHeadingGradingExactPrefixContains() throws {
-    // 小标题分级:== ×5 / 前缀 ×4 / 包含 ×3(介于标题与正文之间)
+    // 单条标题分级:== ×6 / 前缀 ×5 / 包含 ×3(介于标题与正文之间)
     let docs = [
-        CHMSearchDocument(path: "/contains.htm", title: "T", text: "正文丙", headings: "介绍火球与说明"),
-        CHMSearchDocument(path: "/exact.htm", title: "T", text: "正文甲", headings: "火球"),
-        CHMSearchDocument(path: "/prefix.htm", title: "T", text: "正文乙", headings: "火球大全"),
+        CHMSearchDocument(path: "/contains.htm", title: "T", text: "正文丙", headings: ["介绍火球与说明"]),
+        CHMSearchDocument(path: "/exact.htm", title: "T", text: "正文甲", headings: ["火球"]),
+        CHMSearchDocument(path: "/prefix.htm", title: "T", text: "正文乙", headings: ["火球大全"]),
     ]
     let idx = CHMSearchIndex(documents: docs)
     #expect(idx.searchResults("火球").hits.map(\.path)
         == ["/exact.htm", "/prefix.htm", "/contains.htm"])
 }
 
-@Test func searchTitleExactStillBeatsHeadingExact() throws {
-    // 页面标题精确(×8)仍高于小标题精确(×5)
+@Test func searchHeadingGradingIsPerHeadingNotJoinedBlob() throws {
+    // 多标题页:查询命中其中一条(前缀×5)应高于他页单条包含(×3)——
+    // 法术详述页排序问题的关键:50 个法术名各自成条,火球术按单条分级;
+    // 两页正文同构无命中,隔离纯标题信号(密度归一不干扰)
+    let filler = String(repeating: "填充正文 ", count: 100)
     let docs = [
-        CHMSearchDocument(path: "/heading.htm", title: "其他", text: "正文一", headings: "火球"),
-        CHMSearchDocument(path: "/title.htm", title: "火球", text: "正文二", headings: "无关"),
+        CHMSearchDocument(path: "/list.htm", title: "T", text: filler,
+                          headings: ["杂项火球术条目"]),
+        CHMSearchDocument(path: "/spells.htm", title: "三环", text: filler,
+                          headings: ["活化死尸｜Animate Dead", "火球术｜Fireball", "降咒｜Bestow Curse"]),
+    ]
+    let idx = CHMSearchIndex(documents: docs)
+    #expect(idx.searchResults("火球术").hits.first?.path == "/spells.htm")
+}
+
+@Test func searchPhraseAcrossSeparateHeadingsNotBoosted() throws {
+    // 短语判定按单条标题:两条标题各含一词不构成短语(拆分页各 ×3,
+    // 连续页 ×5+×3 且享短语 ×1.5)
+    let docs = [
+        CHMSearchDocument(path: "/split.htm", title: "T", text: "正文一",
+                          headings: ["介绍火球与说明", "介绍法术与说明"]),
+        CHMSearchDocument(path: "/joined.htm", title: "T", text: "正文二",
+                          headings: ["火球 法术"]),
+    ]
+    let idx = CHMSearchIndex(documents: docs)
+    #expect(idx.searchResults("火球 法术").hits.first?.path == "/joined.htm")
+}
+
+@Test func searchTitleExactStillBeatsHeadingExact() throws {
+    // 页面标题精确(×8)仍高于单条小标题精确(×6)
+    let docs = [
+        CHMSearchDocument(path: "/heading.htm", title: "其他", text: "正文一", headings: ["火球"]),
+        CHMSearchDocument(path: "/title.htm", title: "火球", text: "正文二", headings: ["无关"]),
     ]
     let idx = CHMSearchIndex(documents: docs)
     #expect(idx.searchResults("火球").hits.first?.path == "/title.htm")
 }
 
 @Test func headingFieldBackwardCompatibleWithOldCache() throws {
-    // 旧缓存缺 headings 键:解码为空,搜索照常(无小标题信号,重建后生效)
+    // 旧缓存缺 headings 键:解码为空数组,搜索照常(无小标题信号,重建后生效)
     let dict: [String: Any] = ["path": "/a.htm", "title": "A", "text": "法术内容"]
     let data = try PropertyListSerialization.data(fromPropertyList: dict, format: .binary, options: 0)
     let doc = try PropertyListDecoder().decode(CHMSearchDocument.self, from: data)
-    #expect(doc.headings == "")
-    #expect(doc.headingsLower == "")
+    #expect(doc.headings == [])
+    #expect(doc.headingsLower == [])
     #expect(doc.titleLower == "a", "小写预计算应在解码时重算")
-    // 新格式往返:headings 保留
-    let fresh = CHMSearchDocument(path: "/h.htm", title: "T", text: "正文", headings: "甲 乙")
+    // 短暂存在过的字符串型 headings 缓存:解码失败→整体重建(恢复信号)
+    let legacy: [String: Any] = ["path": "/a.htm", "title": "A", "text": "x", "headings": "甲 乙"]
+    let legacyData = try PropertyListSerialization.data(fromPropertyList: legacy, format: .binary, options: 0)
+    #expect((try? PropertyListDecoder().decode(CHMSearchDocument.self, from: legacyData)) == nil,
+            "字符串型 headings 应解码失败以触发索引重建")
+    // 新格式往返:数组保留
+    let fresh = CHMSearchDocument(path: "/h.htm", title: "T", text: "正文", headings: ["甲", "乙"])
     let roundtrip = try PropertyListDecoder().decode(
         CHMSearchDocument.self, from: PropertyListEncoder().encode(fresh))
-    #expect(roundtrip.headings == "甲 乙")
-    #expect(roundtrip.headingsLower == "甲 乙")
+    #expect(roundtrip.headings == ["甲", "乙"])
+    #expect(roundtrip.headingsLower == ["甲", "乙"])
 }
 
 // MARK: - 缓存
@@ -501,7 +535,7 @@ func builtIndexContainsHeadingSignal() throws {
     let idx = try CHMSearchIndex.build(container: c, entries: Array(htmlEntries.prefix(500)))
     let withHeadings = idx.documents.filter { !$0.headings.isEmpty }
     print("HEADINGS signal: \(withHeadings.count)/\(idx.documents.count) pages, "
-        + "sample: \(withHeadings.first.map { String($0.headings.prefix(60)) } ?? "-")")
+        + "sample: \(withHeadings.first.flatMap { $0.headings.first }.map { String($0.prefix(60)) } ?? "-")")
     #expect(!withHeadings.isEmpty, "前 500 页应至少一页含 h1~h6 小标题")
 }
 
@@ -518,6 +552,15 @@ func relevanceRankingOnBenchmark() throws {
     // 多词 AND:命中数不多于单词;零结果不回退 OR
     let multi = idx.searchResults("法术 职业", limit: 10)
     #expect(multi.total <= r.total)
+    // 法术名查询回归:法术详述页(单条小标题前缀命中)应进 top-3——
+    // 多标题页按单条分级的核心收益(拼接串时代仅 contains,曾排第 7)
+    let fireball = idx.scoredResults("火球术")
+    let topPaths = Set(fireball.prefix(3).map(\.hit.path))
+    let detailInTop3 = idx.documents.contains {
+        $0.path.contains("法术详述") && topPaths.contains($0.path)
+            && $0.headingsLower.contains { $0.hasPrefix("火球术") }
+    }
+    #expect(detailInTop3, "法术详述页应进入 火球术 top-3")
     // 打分观测(人工检视):top-5 标题+分数,整轮打分耗时
     let t = Date()
     let scored = idx.scoredResults("法术")

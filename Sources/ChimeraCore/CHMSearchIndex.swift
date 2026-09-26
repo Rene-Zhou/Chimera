@@ -19,12 +19,12 @@ public enum CHMTextExtractor {
         return t.isEmpty ? nil : t
     }
 
-    /// 抽取 h1~h6 小标题文本(小标题加权用):内容片段经 plainText
-    /// (内层标签→空格/实体解码/空白折叠)后以空格拼接;无匹配返回 ""。
+    /// 抽取 h1~h6 小标题(小标题加权用):每条标题独立成元素,内容片段经
+    /// plainText(内层标签→空格/实体解码/空白折叠);无匹配返回空数组。
     /// 大小写不敏感;不闭合的标题取到下一个标题开标签或串尾;
     /// `<head>`/`<hr>` 等非数字标题标签不匹配。注:极罕见的
     /// script/注释内出现的标题标记会被误抽(可容忍的噪声)。
-    public static func headingText(from html: String) -> String {
+    public static func headings(from html: String) -> [String] {
         var parts: [String] = []
         var cursor = html.startIndex
         while let open = nextHeadingOpen(html, from: cursor) {
@@ -53,7 +53,7 @@ public enum CHMTextExtractor {
                 cursor = html.endIndex
             }
         }
-        return parts.joined(separator: " ")
+        return parts
     }
 
     /// 一个 h1~h6 开标签:层级、'<' 位置、标签结束('>' 之后)位置。
@@ -399,23 +399,23 @@ public struct CHMSearchDocument: Codable, Equatable, Sendable {
     public let title: String
     /// 抽取后的纯文本。
     public let text: String
-    /// h1~h6 小标题拼接文本(小标题加权用);旧缓存缺该键解码为空。
-    public let headings: String
+    /// h1~h6 小标题(每条独立;小标题加权用);旧缓存缺该键解码为空数组。
+    public let headings: [String]
     /// 预计算的小写正文/标题:大小写折叠在构建/解码期只做一次,
     /// 搜索时走纯子串匹配(大书上比逐页 caseInsensitive 快一个量级)。
     /// 不随缓存持久化,解码时重算。
     let textLower: String
     let titleLower: String
-    let headingsLower: String
+    let headingsLower: [String]
 
-    public init(path: String, title: String, text: String, headings: String = "") {
+    public init(path: String, title: String, text: String, headings: [String] = []) {
         self.path = path
         self.title = title
         self.text = text
         self.headings = headings
         self.textLower = text.lowercased()
         self.titleLower = title.lowercased()
-        self.headingsLower = headings.lowercased()
+        self.headingsLower = headings.map { $0.lowercased() }
     }
 
     private enum CodingKeys: String, CodingKey { case path, title, text, headings }
@@ -426,8 +426,9 @@ public struct CHMSearchDocument: Codable, Equatable, Sendable {
             path: try c.decode(String.self, forKey: .path),
             title: try c.decode(String.self, forKey: .title),
             text: try c.decode(String.self, forKey: .text),
-            // 兕底旧缓存:headings 键缺失时为空(重建索引后生效)
-            headings: (try? c.decodeIfPresent(String.self, forKey: .headings)) ?? ""
+            // 兕底旧缓存:headings 键缺失时为空数组;类型不符(短暂存在过的
+            // 字符串型)则抛错→整体索引加载失败→自动重建恢复信号
+            headings: try c.decodeIfPresent([String].self, forKey: .headings) ?? []
         )
     }
 }
@@ -493,7 +494,7 @@ public struct CHMSearchIndex: Codable {
                 if !text.isEmpty {
                     docs.append(CHMSearchDocument(
                         path: entry.path, title: title, text: text,
-                        headings: CHMTextExtractor.headingText(from: html)))
+                        headings: CHMTextExtractor.headings(from: html)))
                 }
             } catch {
                 // P2-12:记录失败页并回调,不再无声跳过
@@ -520,7 +521,8 @@ public struct CHMSearchIndex: Codable {
     /// 才入选**(AND,零结果不回退 OR);整串连续出现(短语)总分 ×1.5。
     /// 打分信号(降序,同分按文档顺序):
     /// - 标题分级:标题==词 ×8 / 前缀 ×5 / 包含 ×2;
-    /// - 小标题分级(h1~h6,构建期抽取):== ×5 / 前缀 ×4 / 包含 ×3;
+    /// - 小标题分级(h1~h6,构建期按条抽取):单条 == ×6 / 前缀 ×5 / 包含 ×3,
+    ///   每词取各标题最优档(多标题页不因拼接稀释精确/前缀信号);
     /// - 正文词频:每词 1+ln(加权词频);ASCII 字母数字词的整词出现
     ///   (前后非字母数字)按双倍计,纯子串命中(如 "art" 命中 "start")单倍;
     /// - 首现位置:越早越加分 1/(1+ln(1+首现字节偏移/文长));
@@ -604,7 +606,7 @@ public struct CHMSearchIndex: Codable {
         var headingScore = 0.0
         var anyTitle = false
         var firstTitleOffset: Int?
-        var firstHeadingOffset: Int?
+        var firstHeadingHit: (term: QueryTerm, headingIndex: Int)?
         var bodyScans: [(term: QueryTerm, scan: TermScan)] = []
 
         for t in terms {
@@ -619,11 +621,17 @@ public struct CHMSearchIndex: Codable {
                 if firstTitleOffset == nil { firstTitleOffset = titleOffset(t, in: doc) }
             }
             var hgrade = 0.0
-            if doc.headingsLower == t.lower { hgrade = 5 }
-            else if doc.headingsLower.hasPrefix(t.lower) { hgrade = 4 }
-            else if doc.headingsLower.contains(t.lower) { hgrade = 3 }
-            if hgrade > 0, firstHeadingOffset == nil {
-                firstHeadingOffset = headingOffset(t, in: doc)
+            var bestHeading: Int? = nil
+            for (hi, h) in doc.headingsLower.enumerated() {
+                let g: Double
+                if h == t.lower { g = 6 }
+                else if h.hasPrefix(t.lower) { g = 5 }
+                else if h.contains(t.lower) { g = 3 }
+                else { continue }
+                if g > hgrade { hgrade = g; bestHeading = hi }
+            }
+            if let bi = bestHeading, firstHeadingHit == nil {
+                firstHeadingHit = (term: t, headingIndex: bi)
             }
             titleScore += grade
             headingScore += hgrade
@@ -649,8 +657,8 @@ public struct CHMSearchIndex: Codable {
         var score = bodyScore / sqrt(ratio) + titleScore + headingScore
         if terms.count > 1,
            doc.textLower.contains(phrase) || doc.titleLower.contains(phrase)
-               || doc.headingsLower.contains(phrase) {
-            score *= 1.5   // 短语连续出现(整串含空格原样)
+               || doc.headingsLower.contains(where: { $0.contains(phrase) }) {
+            score *= 1.5   // 短语连续出现(整串含空格原样;小标题按单条判定)
         }
 
         // 摘要与偏移:正文命中 → 最稀有正文词(同词频取词序靠前)首现;
@@ -668,12 +676,15 @@ public struct CHMSearchIndex: Codable {
                 snippet: CHMSnippet.around(titleOff, in: doc.title),
                 offset: titleOff, isTitleMatch: true))
         }
-        if let headingOff = firstHeadingOffset {
-            // 全部词仅小标题命中:摘要取自小标题文本
+        if let hit = firstHeadingHit {
+            // 全部词仅小标题命中:摘要取自命中的那条标题
+            let raw = doc.headings[hit.headingIndex]
+            let offset = headingOffset(hit.term,
+                                       lower: doc.headingsLower[hit.headingIndex], raw: raw)
             return ScoredHit(score: score, hit: CHMSearchHit(
                 path: doc.path, title: doc.title,
-                snippet: CHMSnippet.around(headingOff, in: doc.headings),
-                offset: headingOff, isTitleMatch: anyTitle))
+                snippet: CHMSnippet.around(offset, in: raw),
+                offset: offset, isTitleMatch: anyTitle))
         }
         // 理论不可达(AND 要求每词至少一处命中):兜底
         return ScoredHit(score: score, hit: CHMSearchHit(
@@ -682,15 +693,13 @@ public struct CHMSearchIndex: Codable {
             offset: 0, isTitleMatch: anyTitle))
     }
 
-    /// 小标题内首现偏移(对齐/回退规则同 bodyOffset);仅在小标题命中后调用。
-    private static func headingOffset(_ term: QueryTerm, in doc: CHMSearchDocument) -> Int? {
-        guard !doc.headingsLower.isEmpty else { return nil }
-        if doc.headings.count == doc.headingsLower.count,
-           let r = doc.headingsLower.range(of: term.lower) {
-            return doc.headingsLower.distance(from: doc.headingsLower.startIndex, to: r.lowerBound)
+    /// 单条标题内首现偏移(对齐/回退规则同 bodyOffset)。
+    private static func headingOffset(_ term: QueryTerm, lower: String, raw: String) -> Int {
+        if raw.count == lower.count, let r = lower.range(of: term.lower) {
+            return lower.distance(from: lower.startIndex, to: r.lowerBound)
         }
-        if let r = doc.headings.range(of: term.raw, options: .caseInsensitive) {
-            return doc.headings.distance(from: doc.headings.startIndex, to: r.lowerBound)
+        if let r = raw.range(of: term.raw, options: .caseInsensitive) {
+            return raw.distance(from: raw.startIndex, to: r.lowerBound)
         }
         return 0
     }
