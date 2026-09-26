@@ -177,6 +177,9 @@ struct SidebarView: View {
                     }
                 }
             }
+
+            // 内容不足一屏时贴顶显示;否则会被侧栏列垂直居中,上方留出大片空白
+            Spacer(minLength: 0)
         }
     }
 
