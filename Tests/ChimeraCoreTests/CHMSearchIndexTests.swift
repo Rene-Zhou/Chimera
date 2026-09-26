@@ -279,6 +279,84 @@ import Foundation
     }
 }
 
+// MARK: - 小标题(h1~h6)抽取与加权
+
+@Test func headingTextExtractsH1ToH6() {
+    // 基本:h1~h6 全档、大小写不敏感、内层标签→空格、片段空格拼接
+    let html = """
+    <html><head><title>页题</title></head>
+    <body><h1>第一章</h1><p>正文一</p>
+    <H2>火球 <b>术</b>的说明</H2><p>正文二</p>
+    <h3>附注</h3></body></html>
+    """
+    #expect(CHMTextExtractor.headingText(from: html) == "第一章 火球 术 的说明 附注")
+}
+
+@Test func headingTextHandlesUnclosedAndSkipsNonHeadingTags() {
+    // 不闭合:取到下一个标题开标签;head/hr/h7 不算标题
+    let unclosed = "<h2>未闭合<h3>第二个</h3>尾部<h4>第三</h4>"
+    #expect(CHMTextExtractor.headingText(from: unclosed) == "未闭合 第二个 第三")
+    let nonHeading = "<html><head><meta></head><body><hr><h7>伪标题</h7><h2>真标题</h2></body></html>"
+    #expect(CHMTextExtractor.headingText(from: nonHeading) == "真标题")
+    // 无标题 → 空串
+    #expect(CHMTextExtractor.headingText(from: "<p>没有标题的正文</p>") == "")
+    // 自闭合 <h2/> 不吞噬后续内容
+    let selfClosed = "<h2/><p>正文</p><h3>真标题</h3>"
+    #expect(CHMTextExtractor.headingText(from: selfClosed) == "真标题")
+}
+
+@Test func searchHeadingMatchOutranksBodyMention() throws {
+    // 小标题命中(×3)应胜过正文单次提及(≈1.8);摘要取自小标题;isTitleMatch 为假
+    let docs = [
+        CHMSearchDocument(path: "/body.htm", title: "T", text: "介绍与火球的正文内容"),
+        CHMSearchDocument(path: "/heading.htm", title: "T", text: "介绍与说明的正文内容",
+                          headings: "火球术 施法者指南"),
+    ]
+    let idx = CHMSearchIndex(documents: docs)
+    let first = try #require(idx.searchResults("火球").hits.first)
+    #expect(first.path == "/heading.htm")
+    #expect(first.snippet.contains("火球术"), "仅小标题命中时摘要取自小标题")
+    #expect(!first.isTitleMatch)
+}
+
+@Test func searchHeadingGradingExactPrefixContains() throws {
+    // 小标题分级:== ×5 / 前缀 ×4 / 包含 ×3(介于标题与正文之间)
+    let docs = [
+        CHMSearchDocument(path: "/contains.htm", title: "T", text: "正文丙", headings: "介绍火球与说明"),
+        CHMSearchDocument(path: "/exact.htm", title: "T", text: "正文甲", headings: "火球"),
+        CHMSearchDocument(path: "/prefix.htm", title: "T", text: "正文乙", headings: "火球大全"),
+    ]
+    let idx = CHMSearchIndex(documents: docs)
+    #expect(idx.searchResults("火球").hits.map(\.path)
+        == ["/exact.htm", "/prefix.htm", "/contains.htm"])
+}
+
+@Test func searchTitleExactStillBeatsHeadingExact() throws {
+    // 页面标题精确(×8)仍高于小标题精确(×5)
+    let docs = [
+        CHMSearchDocument(path: "/heading.htm", title: "其他", text: "正文一", headings: "火球"),
+        CHMSearchDocument(path: "/title.htm", title: "火球", text: "正文二", headings: "无关"),
+    ]
+    let idx = CHMSearchIndex(documents: docs)
+    #expect(idx.searchResults("火球").hits.first?.path == "/title.htm")
+}
+
+@Test func headingFieldBackwardCompatibleWithOldCache() throws {
+    // 旧缓存缺 headings 键:解码为空,搜索照常(无小标题信号,重建后生效)
+    let dict: [String: Any] = ["path": "/a.htm", "title": "A", "text": "法术内容"]
+    let data = try PropertyListSerialization.data(fromPropertyList: dict, format: .binary, options: 0)
+    let doc = try PropertyListDecoder().decode(CHMSearchDocument.self, from: data)
+    #expect(doc.headings == "")
+    #expect(doc.headingsLower == "")
+    #expect(doc.titleLower == "a", "小写预计算应在解码时重算")
+    // 新格式往返:headings 保留
+    let fresh = CHMSearchDocument(path: "/h.htm", title: "T", text: "正文", headings: "甲 乙")
+    let roundtrip = try PropertyListDecoder().decode(
+        CHMSearchDocument.self, from: PropertyListEncoder().encode(fresh))
+    #expect(roundtrip.headings == "甲 乙")
+    #expect(roundtrip.headingsLower == "甲 乙")
+}
+
 // MARK: - 缓存
 
 @Test func cacheRoundtripAndStableKey() throws {
@@ -411,6 +489,20 @@ func buildsIndexFromBenchmark() throws {
     try idx.save(to: cache)
     let loaded = try #require(try CHMSearchIndex.load(from: cache))
     #expect(loaded.documents.count == idx.documents.count)
+}
+
+@Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
+func builtIndexContainsHeadingSignal() throws {
+    // 构建 wiring:真实 CHM 页面应抽到非空小标题信号
+    let c = try CHMContainer(path: benchmarkCHMPath)
+    let htmlEntries = try c.allEntries().filter {
+        !$0.isDirectory && ["htm", "html"].contains(($0.path as NSString).pathExtension.lowercased())
+    }
+    let idx = try CHMSearchIndex.build(container: c, entries: Array(htmlEntries.prefix(500)))
+    let withHeadings = idx.documents.filter { !$0.headings.isEmpty }
+    print("HEADINGS signal: \(withHeadings.count)/\(idx.documents.count) pages, "
+        + "sample: \(withHeadings.first.map { String($0.headings.prefix(60)) } ?? "-")")
+    #expect(!withHeadings.isEmpty, "前 500 页应至少一页含 h1~h6 小标题")
 }
 
 @Test(.enabled(if: benchmarkCHMExists, "基准 CHM 文件缺失(可用 CHIMERA_BENCHMARK_CHM 指定)"))
