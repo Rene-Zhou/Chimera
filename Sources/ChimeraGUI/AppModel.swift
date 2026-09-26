@@ -100,8 +100,6 @@ final class AppModel: ObservableObject {
         let url: URL
         let container: CHMContainer
         let homePath: String
-        let toc: [CHMTocItem]
-        let indexEntries: [CHMIndexEntry]
     }
 
     struct NavigationRequest: Equatable {
@@ -117,6 +115,18 @@ final class AppModel: ObservableObject {
 
     var activeTab: ReaderTab? { tabs.first { $0.id == activeTabID } }
     var document: Document? { tabs.first?.document }
+
+    // MARK: 目录/索引(书级,后台解析回填;侧栏直读此处,Document 不再持有)
+
+    @Published var bookTOC: [CHMTocItem] = []
+    @Published var bookIndexEntries: [CHMIndexEntry] = []
+    /// bookTOC 内容版本号,每次赋值自增:供侧栏扁平化缓存/全部展开缓存做
+    /// O(1) 失效判断,免去整棵树的深比较(CHMTocItem 虽 Equatable 但全树比较 O(n))。
+    var bookTOCEdition = 0
+    /// "全部展开"的父节点 id 集合缓存(按 bookTOCEdition 失效)。
+    private var cachedParentIDs: (edition: Int, ids: Set<String>)?
+    /// open 阶段 allEntries() 的枚举结果,转交索引构建复用(免二遍全目录枚举)。
+    private var cachedAllEntries: [CHMEntry]?
 
     // MARK: 全书搜索(书级,同书标签共享)
 
@@ -216,6 +226,13 @@ final class AppModel: ObservableObject {
         bookmarkStore = nil
         tocExpanded = []
         tocExpansionStore = nil
+        // 目录/索引同为书级状态:换书即清(异步解析完成前侧栏显示占位),
+        // 并失效扁平化/全部展开缓存、丢弃上一本的条目枚举
+        bookTOC = []
+        bookIndexEntries = []
+        tocTitleMap = [:]
+        bookTOCEdition += 1
+        cachedAllEntries = nil
         do {
             let container = try CHMContainer(path: url.path)
             let info = try container.systemInfo()
@@ -224,28 +241,11 @@ final class AppModel: ObservableObject {
             }
             let homePath = topic.hasPrefix("/") ? topic : "/" + topic
 
-            var toc: [CHMTocItem] = []
-            var indexEntries: [CHMIndexEntry] = []
-            let allEntries = try container.allEntries()
-            if let hhc = allEntries.first(where: { $0.path.hasSuffix(".hhc") })?.path {
-                let text = CHMTextDecoder(lcid: info?.lcid).decode(try container.read(hhc))
-                toc = CHMSitemapParser.parseTOC(text)
-            }
-            if let hhk = allEntries.first(where: { $0.path.hasSuffix(".hhk") })?.path {
-                let text = CHMTextDecoder(lcid: info?.lcid).decode(try container.read(hhk))
-                indexEntries = CHMSitemapParser.parseIndex(text)
-            }
-            if smoke {
-                print("OPEN toc=\(toc.count) index=\(indexEntries.count)")
-            }
-
-            let doc = Document(url: url, container: container, homePath: homePath,
-                               toc: toc, indexEntries: indexEntries)
+            let doc = Document(url: url, container: container, homePath: homePath)
 
             bookmarkStore = CHMBookmarkStore(
                 storageURL: ChimeraStateDir.bookmarkStorageURL(for: url))
             bookmarks = bookmarkStore?.bookmarks ?? []
-            tocTitleMap = Self.tocTitles(from: toc)
 
             // 目录展开状态:有存档恢复存档;首次打开默认全部收起
             let expStore = TOCExpansionStore(
@@ -264,7 +264,29 @@ final class AppModel: ObservableObject {
             readingStateStore.recordRecent(url.path)
             recents = readingStateStore.recents
             lastError = nil
-            buildIndexIfNeeded()
+
+            // 目录/索引解析:allEntries() 全目录枚举 + .hhc/.hhk 读取解码解析,
+            // 大书可达 MB 级,不再阻塞首开。冒烟(CHIMERA_SMOKE=1)必须保持
+            // 全同步——状态机(tabDidFinish)依赖打开完成后 toc/searchIndex
+            // 立即可用,SEARCH 在 stage 1 就读 searchIndex。
+            if smoke {
+                let parsed = try Self.parseSitemaps(container: container, info: info)
+                print("OPEN toc=\(parsed.toc.count) index=\(parsed.indexEntries.count)")
+                applySitemaps(parsed)
+                buildIndexIfNeeded()
+            } else {
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    // 解析失败不致命:书已可读,仅目录/索引缺席
+                    let parsed = (try? Self.parseSitemaps(container: container, info: info))
+                        ?? SitemapParse(toc: [], indexEntries: [], allEntries: [])
+                    DispatchQueue.main.async {
+                        // 解析期间可能已换书:陈旧结果直接丢弃
+                        guard let self, self.document?.url == url else { return }
+                        self.applySitemaps(parsed)
+                        self.buildIndexIfNeeded()
+                    }
+                }
+            }
         } catch {
             tabs = []
             activeTabID = nil
@@ -274,6 +296,43 @@ final class AppModel: ObservableObject {
                 exit(1)
             }
         }
+    }
+
+    /// 目录/索引解析结果(含 allEntries 枚举,转交索引构建复用)。
+    struct SitemapParse {
+        let toc: [CHMTocItem]
+        let indexEntries: [CHMIndexEntry]
+        let allEntries: [CHMEntry]
+    }
+
+    /// 全目录枚举 + .hhc/.hhk 读取解码解析;同步/异步打开路径共用,
+    /// 在调用方线程执行(冒烟主线程 / 普通模式后台队列)。
+    nonisolated private static func parseSitemaps(
+        container: CHMContainer, info: CHMSystemInfo?
+    ) throws -> SitemapParse {
+        let allEntries = try container.allEntries()
+        var toc: [CHMTocItem] = []
+        var indexEntries: [CHMIndexEntry] = []
+        if let hhc = allEntries.first(where: { $0.path.hasSuffix(".hhc") })?.path {
+            let text = CHMTextDecoder(lcid: info?.lcid).decode(try container.read(hhc))
+            toc = CHMSitemapParser.parseTOC(text)
+        }
+        if let hhk = allEntries.first(where: { $0.path.hasSuffix(".hhk") })?.path {
+            let text = CHMTextDecoder(lcid: info?.lcid).decode(try container.read(hhk))
+            indexEntries = CHMSitemapParser.parseIndex(text)
+        }
+        return SitemapParse(toc: toc, indexEntries: indexEntries, allEntries: allEntries)
+    }
+
+    /// 解析结果回填书级状态(主线程),并刷新既有标签标题(异步解析时
+    /// 首屏标题先以 <title>/路径兑底,解析完成后按 TOC 重刷)。
+    private func applySitemaps(_ parsed: SitemapParse) {
+        bookTOC = parsed.toc
+        bookIndexEntries = parsed.indexEntries
+        bookTOCEdition += 1
+        tocTitleMap = Self.tocTitles(from: parsed.toc)
+        cachedAllEntries = parsed.allEntries
+        for tab in tabs { tab.refreshTitle() }
     }
 
     // MARK: 标签管理
@@ -325,10 +384,17 @@ final class AppModel: ObservableObject {
         tocExpansionStore?.save(tocExpanded)
     }
 
-    /// 全部展开(仅含子节点的目录项参与展开集合)。
+    /// 全部展开(仅含子节点的目录项参与展开集合);
+    /// allParentIDs 按目录版本 memoize(与扁平化缓存同一失效条件)。
     func expandAllTOC() {
-        guard let doc = document else { return }
-        let ids = TOCFlattener.allParentIDs(doc.toc)
+        guard document != nil else { return }
+        let ids: Set<String>
+        if let c = cachedParentIDs, c.edition == bookTOCEdition {
+            ids = c.ids
+        } else {
+            ids = TOCFlattener.allParentIDs(bookTOC)
+            cachedParentIDs = (edition: bookTOCEdition, ids: ids)
+        }
         tocExpanded = ids
         tocExpansionStore?.save(ids)
     }
@@ -365,12 +431,17 @@ final class AppModel: ObservableObject {
     func buildIndexIfNeeded() {
         guard let doc = document, searchIndex == nil, !indexBuilding else { return }
         let cacheURL = ChimeraStateDir.indexCacheURL(for: doc.url)
+        // 独立句柄:CHMContainer 内部锁按 handle 独立,构建逐页解压不再阻塞
+        // UI 句柄的资源请求(CHM 只读、多句柄安全);打开失败回退 UI 句柄。
+        let buildContainer = (try? CHMContainer(path: doc.url.path)) ?? doc.container
+        let tocTitles = tocTitleMap
+        let entries = cachedAllEntries
 
         if smoke {
             indexBuilding = true
             let idx = CHMSearchIndex.load(from: cacheURL)
-                ?? (try? CHMSearchIndex.build(container: doc.container,
-                                              tocTitles: Self.tocTitles(from: doc.toc)))
+                ?? (try? Self.buildIndex(container: buildContainer, entries: entries,
+                                         tocTitles: tocTitles))
             indexBuilding = false
             searchIndex = idx
             if let idx { try? idx.save(to: cacheURL) }
@@ -379,12 +450,11 @@ final class AppModel: ObservableObject {
 
         indexBuilding = true
         let bookURL = doc.url
-        let tocTitles = Self.tocTitles(from: doc.toc)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             var idx = CHMSearchIndex.load(from: cacheURL)
             if idx == nil {
-                idx = try? CHMSearchIndex.build(container: doc.container,
-                                                tocTitles: tocTitles)
+                idx = try? Self.buildIndex(container: buildContainer, entries: entries,
+                                           tocTitles: tocTitles)
                 if let built = idx { try? built.save(to: cacheURL) }
             }
             DispatchQueue.main.async {
@@ -394,6 +464,18 @@ final class AppModel: ObservableObject {
                 self.indexBuilding = false
             }
         }
+    }
+
+    /// 构建入口:优先复用 open 阶段 allEntries() 结果(免重复全目录枚举)。
+    /// nonisolated:后台队列直接调用。
+    nonisolated private static func buildIndex(
+        container: CHMContainer, entries: [CHMEntry]?, tocTitles: [String: String]
+    ) throws -> CHMSearchIndex {
+        if let entries {
+            return try CHMSearchIndex.build(container: container, entries: entries,
+                                            tocTitles: tocTitles)
+        }
+        return try CHMSearchIndex.build(container: container, tocTitles: tocTitles)
     }
 
     func startFind() {

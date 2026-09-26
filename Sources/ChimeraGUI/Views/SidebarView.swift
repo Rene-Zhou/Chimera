@@ -15,6 +15,25 @@ struct SidebarView: View {
     final class SidebarState: ObservableObject {
         @Published var tab = SidebarTab.toc
         @Published var indexQuery = ""
+        /// 全书搜索输入的本地副本:逐键只重绘搜索框本身,不再触发侧栏重算;
+        /// 回车(onSubmit)才写回 model.searchQuery 并搜索。
+        /// (冒烟 SEARCH 直接设 model.searchQuery + runSearch(),不经此字段,不受影响)
+        @Published var searchInput = ""
+
+        // MARK: TOC 扁平化 memoize:上次目录版本 + 展开集合未变则直接复用产物,
+        // 免得每次 body 重算都重摊平整棵树(展开态上万节点);Set<String>
+        // 与 Int 的相等比较远比 O(n) 摊平便宜。
+        private var flatEdition = -1
+        private var flatExpanded: Set<String> = []
+        private var flatRowsCache: [TOCFlatRow] = []
+
+        func flatRows(toc: [CHMTocItem], edition: Int, expanded: Set<String>) -> [TOCFlatRow] {
+            if flatEdition == edition, flatExpanded == expanded { return flatRowsCache }
+            flatEdition = edition
+            flatExpanded = expanded
+            flatRowsCache = TOCFlattener.flatten(toc, expanded: expanded)
+            return flatRowsCache
+        }
     }
 
     var body: some View {
@@ -31,10 +50,11 @@ struct SidebarView: View {
 
             switch state.tab {
             case .toc:
-                if let toc = model.document?.toc {
+                if model.document != nil {
                     // 自绘树:List(children:) 的整行点击会被展开手势吃掉,
                     // 既有 local 又有 children 的节点无法导航。改为递归行视图:
                     // 点标题=导航,点箭头=展开/收起,展开状态按书持久化(PRD F3)。
+                    // 目录异步解析(bookTOC 后台回填)期间显示占位,完成后自动出现。
                     VStack(spacing: 0) {
                         HStack {
                             Spacer()
@@ -49,27 +69,38 @@ struct SidebarView: View {
                         }
                         .padding(.horizontal, 10)
                         .padding(.bottom, 2)
-                        ScrollView {
-                            LazyVStack(alignment: .leading, spacing: 2) {
-                                // 扁平化 + 懒加载:只渲染可见行,"全部展开"也不会瞬间生成数千视图
-                                ForEach(TOCFlattener.flatten(toc, expanded: model.tocExpanded)) { row in
-                                    TOCRowView(
-                                        row: row,
-                                        expanded: model.tocExpanded.contains(row.id),
-                                        onToggle: { model.toggleTOCExpanded(row.id) },
-                                        onOpen: { local in
-                                            if NSEvent.modifierFlags.contains(.command) {
-                                                model.openInNewTab(local)
-                                            } else {
-                                                model.navigate(to: local)
-                                            }
-                                        },
-                                        onOpenInNewTab: { model.openInNewTab($0) }
-                                    )
+                        if model.bookTOC.isEmpty {
+                            Text("正在载入目录…")
+                                .foregroundStyle(.secondary)
+                                .font(.caption)
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, 12)
+                        } else {
+                            ScrollView {
+                                LazyVStack(alignment: .leading, spacing: 2) {
+                                    // 扁平化 + 懒加载:只渲染可见行,"全部展开"也不会瞬间生成数千视图;
+                                    // 摊平结果按(目录版本,展开集合)memoize(见 SidebarState.flatRows)
+                                    ForEach(state.flatRows(toc: model.bookTOC,
+                                                           edition: model.bookTOCEdition,
+                                                           expanded: model.tocExpanded)) { row in
+                                        TOCRowView(
+                                            row: row,
+                                            expanded: model.tocExpanded.contains(row.id),
+                                            onToggle: { model.toggleTOCExpanded(row.id) },
+                                            onOpen: { local in
+                                                if NSEvent.modifierFlags.contains(.command) {
+                                                    model.openInNewTab(local)
+                                                } else {
+                                                    model.navigate(to: local)
+                                                }
+                                            },
+                                            onOpenInNewTab: { model.openInNewTab($0) }
+                                        )
+                                    }
                                 }
+                                .padding(.vertical, 4)
+                                .padding(.horizontal, 6)
                             }
-                            .padding(.vertical, 4)
-                            .padding(.horizontal, 6)
                         }
                     }
                 }
@@ -110,12 +141,19 @@ struct SidebarView: View {
                     HStack(spacing: 6) {
                         Image(systemName: "magnifyingglass")
                             .foregroundStyle(.secondary)
-                        TextField("搜索全书…", text: $model.searchQuery)
+                        TextField("搜索全书…", text: $state.searchInput)
                             .textFieldStyle(.plain)
-                            .onSubmit { model.runSearch() }
-                        if !model.searchQuery.isEmpty {
-                            Button("✕") { model.searchQuery = ""; model.runSearch() }
-                                .buttonStyle(.plain).foregroundStyle(.secondary)
+                            .onSubmit {
+                                model.searchQuery = state.searchInput
+                                model.runSearch()
+                            }
+                        if !state.searchInput.isEmpty {
+                            Button("✕") {
+                                state.searchInput = ""
+                                model.searchQuery = ""
+                                model.runSearch()
+                            }
+                            .buttonStyle(.plain).foregroundStyle(.secondary)
                         }
                     }
                     .padding(6)
@@ -209,10 +247,14 @@ struct SidebarView: View {
             // 内容不足一屏时贴顶显示;否则会被侧栏列垂直居中,上方留出大片空白
             Spacer(minLength: 0)
         }
+        // 换书重置/外部清空 searchQuery 时同步本地输入框,避免残留上一书的查询词
+        .onChange(of: model.searchQuery) { q in
+            if q.isEmpty { state.searchInput = "" }
+        }
     }
 
     private var filteredIndex: [CHMIndexEntry] {
-        let all = model.document?.indexEntries ?? []
+        let all = model.bookIndexEntries
         guard !state.indexQuery.isEmpty else { return all }
         return all.filter { $0.keyword.localizedCaseInsensitiveContains(state.indexQuery) }
     }

@@ -31,7 +31,8 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
         config.setURLSchemeHandler(CHMSchemeHandler(provider: { container }), forURLScheme: "chm")
         // 离线防线:屏蔽一切 http(s) 子资源(远程图片/脚本/字体等)。
         // 主框架导航由 decidePolicyFor 处理,这里只管子资源,与 PRD"无外部网络请求"对齐。
-        // 异步安装,不阻塞标签创建(规则按 identifier 持久化,二次启动走缓存)
+        // 异步安装,不阻塞标签创建(规则按 identifier 持久化,二次启动走缓存);
+        // 首次安装完成前初次加载会被积压到规则就绪(见 load),后续标签直接放行
         Self.installOfflineRules(into: config.userContentController)
         webView = WKWebView(frame: .zero, configuration: config)
 
@@ -81,33 +82,80 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
         if let p = history.goForward() { requestNav(p) }
     }
 
+    // MARK: 离线拦截规则(进程级一次性)
+
+    /// 规则安装是否已了结(就绪或失败放行);仅主线程读写。
+    /// 首个 webView.load 必须等它置位,防止规则编译完成前首个页面已发出、
+    /// 外部 http(s) 子资源漏网(违反 PRD"无外部网络请求")。
+    private static var offlineRulesSettled = false
+    private static var offlineRulesInstallStarted = false
+    /// 规则就绪前积压的待执行加载(仅规则就绪前创建的标签初次加载会走这里)。
+    private static var offlineRulesWaiters: [() -> Void] = []
+
     /// 编译/读取持久化的内容拦截规则(屏蔽 http/https 子资源)。
     /// 全程异步:编译结果按 identifier 持久化,二次启动 lookUp 直接命中缓存;
     /// 规则可在 WebView 创建后追加到同一个 userContentController。
+    /// 首次安装(进程级)无论成功失败都结束等待——查找/编译失败放行并打日志,
+    /// 绝不能卡死启动。
     private static func installOfflineRules(into ucc: WKUserContentController) {
-        guard let store = WKContentRuleListStore.default() else { return }
+        let isFirst = !offlineRulesInstallStarted   // 主线程调用(标签创建)
+        offlineRulesInstallStarted = true
+        let settleIfFirst: (String?) -> Void = { failure in
+            if isFirst { Self.settleOfflineRules(failure) }
+        }
+        guard let store = WKContentRuleListStore.default() else {
+            settleIfFirst("WKContentRuleListStore.default() 不可用")
+            return
+        }
         let id = "chimera-block-external-subresources"
         store.lookUpContentRuleList(forIdentifier: id) { list, _ in
-            if let list {
-                ucc.add(list)
-                return
-            }
-            let json = #"[{"trigger":{"url-filter":"^https?://","resource-type":["image","script","style-sheet","font","media","svg-document","raw","popup","ping","fetch","websocket","other"]},"action":{"type":"block"}}]"#
-            store.compileContentRuleList(forIdentifier: id, encodedContentRuleList: json) { list, _ in
-                if let list { ucc.add(list) }
+            DispatchQueue.main.async {
+                if let list {
+                    ucc.add(list)
+                    settleIfFirst(nil)
+                    return
+                }
+                let json = #"[{"trigger":{"url-filter":"^https?://","resource-type":["image","script","style-sheet","font","media","svg-document","raw","popup","ping","fetch","websocket","other"]},"action":{"type":"block"}}]"#
+                store.compileContentRuleList(forIdentifier: id, encodedContentRuleList: json) { list, error in
+                    DispatchQueue.main.async {
+                        if let list { ucc.add(list) }
+                        settleIfFirst(list == nil
+                                      ? "规则编译失败: \(error.map { String(describing: $0) } ?? "-")"
+                                      : nil)
+                    }
+                }
             }
         }
     }
 
+    /// 结束等待:失败记一行日志后照常放行,并触发全部积压的初次加载。
+    private static func settleOfflineRules(_ failure: String?) {
+        if let failure { print("离线拦截规则未安装,放行加载: \(failure)") }
+        offlineRulesSettled = true
+        let waiters = offlineRulesWaiters
+        offlineRulesWaiters.removeAll()
+        waiters.forEach { $0() }
+    }
+
     private func load(path rawPath: String, fragment: String? = nil) {
         let path = rawPath.hasPrefix("/") ? rawPath : "/" + rawPath
-        var comps = URLComponents()
-        comps.scheme = "chm"
-        comps.host = "doc"
-        comps.path = path
-        comps.fragment = fragment
-        if let u = comps.url {
-            webView.load(URLRequest(url: u))
+        let perform = { [weak self] in
+            guard let self else { return }
+            var comps = URLComponents()
+            comps.scheme = "chm"
+            comps.host = "doc"
+            comps.path = path
+            comps.fragment = fragment
+            if let u = comps.url {
+                self.webView.load(URLRequest(url: u))
+            }
+        }
+        // 离线规则就绪(或失败放行)前积压加载,避免首开竞态;
+        // 后续标签创建时规则多半已就绪,直接放行
+        if Self.offlineRulesSettled {
+            perform()
+        } else {
+            Self.offlineRulesWaiters.append(perform)
         }
     }
 
@@ -169,6 +217,10 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
         pageTitle = docTitle.isEmpty ? (path as NSString).lastPathComponent : docTitle
     }
 
+    /// 目录异步解析完成后由模型调用:以刚就绪的 TOC 标题重刷标签标题
+    /// (异步打开时首屏标题先以 <title>/路径兑底)。
+    func refreshTitle() { updatePageTitle() }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         let smoke = ProcessInfo.processInfo.environment["CHIMERA_SMOKE"] == "1"
         updatePageTitle()   // didCommit 时 <title> 尚未解析,此处再刷一次
@@ -227,24 +279,26 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
     }
 
     /// 命中词高亮:文本节点包裹 <mark> 并滚动到首个命中。
+    /// 查询词小写化(ql)在循环外一次完成,对齐 findJS 的做法。
     static func highlightJS(_ query: String) -> String {
         return """
         (function(){
           var q=\(jsStringLiteral(query)); if(!q) return 0;
+          var ql=q.toLowerCase();
           var count=0;
           var walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
           var nodes=[]; while(walker.nextNode()) nodes.push(walker.currentNode);
           nodes.forEach(function(n){
             var t=n.nodeValue; if(!t) return;
-            var lt=t.toLowerCase(); var i=lt.indexOf(q.toLowerCase()); if(i<0) return;
+            var lt=t.toLowerCase(); var i=lt.indexOf(ql); if(i<0) return;
             var frag=document.createDocumentFragment(); var pos=0;
             while(i>=0){
               frag.appendChild(document.createTextNode(t.slice(pos,i)));
               var m=document.createElement('mark');
               m.style.backgroundColor='#ffe066'; m.style.color='inherit';
-              m.textContent=t.substr(i,q.length);
+              m.textContent=t.substring(i,i+q.length);
               frag.appendChild(m); count++;
-              pos=i+q.length; i=lt.indexOf(q.toLowerCase(),pos);
+              pos=i+q.length; i=lt.indexOf(ql,pos);
             }
             frag.appendChild(document.createTextNode(t.slice(pos)));
             n.parentNode.replaceChild(frag,n);
