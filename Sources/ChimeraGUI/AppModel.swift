@@ -474,29 +474,11 @@ final class AppModel: ObservableObject {
                 tab.requestNav(nav)
                 return
             }
-            if env["CHIMERA_CMDCLICK"] == "1" {
-                // ⌘+点击页内首个站内链接:应在新标签页打开(当前标签不动)。
-                // JS 捕获路径读 e.metaKey,合成事件可真实覆盖
-                tab.webView.evaluateJavaScript(
-                    "(function(){var a=document.querySelector('a[href]'); if(!a) return 'nolink';"
-                    + " a.dispatchEvent(new MouseEvent('click',{metaKey:true,bubbles:true,cancelable:true}));"
-                    + " return a.getAttribute('href');})()"
-                ) { r, _ in
-                    guard let href = r as? String else { print("SMOKE FAIL cmdclick nolink"); exit(1) }
-                    print("CMDCLICK href=\(href)")
-                }
-                return
-            }
             print("SMOKE OK url=\(tab.currentPath ?? "-") textLen=\(textLen)")
             exit(0)
 
         case 2:
             guard textLen > 0 else { fail("stage2 textLen=\(textLen)") }
-            if env["CHIMERA_CMDCLICK"] == "1" {
-                let ok = tabs.count == 2
-                print("CMDCLICK tabs=\(tabs.count) ok=\(ok)")
-                exit(ok ? 0 : 1)
-            }
             if env["CHIMERA_RESTORE"] == "1" {
                 print("REOPEN \(tab.document.url.lastPathComponent)")
                 open(url: tab.document.url)
