@@ -10,26 +10,34 @@ ICONBUILD=$DIST/iconbuild
 echo "== 1/4 release 构建 =="
 swift build -c release --product ChimeraApp
 
-echo "== 2/4 图标工业化(svg → 安全边距 → iconset → icns)=="
+echo "== 2/4 图标工业化(svg → iconset → icns)=="
 rm -rf "$ICONBUILD" && mkdir -p "$ICONBUILD"
-qlmanage -t -s 1024 -o "$ICONBUILD" assets/icon/chimera.svg >/dev/null 2>&1
-mv "$ICONBUILD/chimera.svg.png" "$ICONBUILD/raw_1024.png"
-# Apple 图标网格安全边距:内容缩至 90% 居中于透明画布
-uv run --with pillow python - <<'EOF'
-from PIL import Image
-im = Image.open('dist/iconbuild/raw_1024.png').convert('RGBA')
-canvas = Image.new('RGBA', im.size, (0, 0, 0, 0))
-side = int(im.width * 0.90)
-inner = im.resize((side, side), Image.LANCZOS)
-canvas.paste(inner, ((im.width - side) // 2, (im.height - side) // 2))
-canvas.save('dist/iconbuild/safe_1024.png')
+# cairosvg 渲染,保留透明通道(qlmanage 会把 SVG 透明画布拍成白底)。
+# cairocffi 硬编码 cairo 库名,找不到 Homebrew 的 libcairo;
+# 这里把 find_library 指到绝对路径。
+# SVG 瓷砖本身已按 Apple 图标网格设计(896/1024、rx=200),不再二次缩边距——
+# 旧管线的"90% 安全边距"会把已留白的图标再缩一圈,Dock 里明显偏小。
+uv run --with cairosvg --with pillow python - <<'EOF'
+import ctypes.util
+_orig = ctypes.util.find_library
+def _patched(name):
+    if name and 'cairo' in name:
+        return '/opt/homebrew/lib/libcairo.2.dylib'
+    return _orig(name)
+ctypes.util.find_library = _patched
+import cairosvg
+cairosvg.svg2png(url='assets/icon/chimera.svg', write_to='dist/iconbuild/icon_1024.png',
+                 output_width=1024, output_height=1024)
+# 同步刷新仓库预览图
+cairosvg.svg2png(url='assets/icon/chimera.svg', write_to='assets/icon/chimera-preview.png',
+                 output_width=1024, output_height=1024)
 EOF
 ICONSET="$ICONBUILD/AppIcon.iconset"
 rm -rf "$ICONSET" && mkdir -p "$ICONSET"
 for size in 16 32 128 256 512; do
-  sips -z "$size" "$size" "$ICONBUILD/safe_1024.png" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+  sips -z "$size" "$size" "$ICONBUILD/icon_1024.png" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
   d=$((size * 2)); [ "$d" -le 1024 ] && \
-    sips -z "$d" "$d" "$ICONBUILD/safe_1024.png" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+    sips -z "$d" "$d" "$ICONBUILD/icon_1024.png" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$ICONSET" -o "$DIST/AppIcon.icns"
 

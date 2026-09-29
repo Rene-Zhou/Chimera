@@ -161,8 +161,7 @@ final class AppModel: ObservableObject {
 
     // MARK: 显示设置与阅读状态
 
-    @Published var settings = CHMDisplaySettings()
-    @Published var settingsVisible = false
+    @Published var settings = ChimeraSettings()
     @Published var recents: [String] = []
     let settingsStore: CHMSettingsStore
     let readingStateStore: CHMReadingStateStore
@@ -188,8 +187,15 @@ final class AppModel: ObservableObject {
         settings = settingsStore.settings
         recents = readingStateStore.recents
         Self.shared = self
+        // 持久化的外观设置启动即生效(跟随系统 = nil,无需动作)
+        Self.applyAppearance(settings.appearance)
         if let auto = ProcessInfo.processInfo.environment["CHIMERA_AUTO_OPEN"] {
             open(url: URL(fileURLWithPath: (auto as NSString).expandingTildeInPath))
+        } else if !smoke, settings.restoreLastBook,
+                  let last = recents.first,
+                  FileManager.default.fileExists(atPath: last) {
+            // 启动时恢复上次读的书(设置项;冒烟/显式指定打开路径时不介入)
+            open(url: URL(fileURLWithPath: last))
         }
     }
 
@@ -253,13 +259,14 @@ final class AppModel: ObservableObject {
                 tocExpanded = stored
             }
 
-            // 状态记忆:恢复上次阅读位置(条目仍存在时),并登记最近打开
-            let lastPath = readingStateStore.lastPath(forBookKey: url.path)
+            // 状态记忆:恢复上次阅读位置(可在设置中关闭;条目仍存在时),并登记最近打开
+            let lastPath = settings.restoreLastPosition
+                ? readingStateStore.lastPath(forBookKey: url.path) : nil
             let restore = lastPath.flatMap { container.entry(at: $0) != nil ? lastPath : nil }
             let tab = ReaderTab(document: doc, model: self, loadPath: restore)
             tabs = [tab]
             activeTabID = tab.id
-            readingStateStore.recordRecent(url.path)
+            readingStateStore.recordRecent(url.path, limit: settings.recentLimit)
             recents = readingStateStore.recents
             lastError = nil
 
@@ -331,6 +338,10 @@ final class AppModel: ObservableObject {
         tocTitleMap = Self.tocTitles(from: parsed.toc)
         cachedAllEntries = parsed.allEntries
         for tab in tabs { tab.refreshTitle() }
+        // 首次打开(无展开存档)且设置为默认展开:目录解析就绪后全部展开
+        if tocExpansionStore?.expanded == nil, settings.tocDefaultExpanded {
+            expandAllTOC()
+        }
     }
 
     // MARK: 标签管理
@@ -406,7 +417,7 @@ final class AppModel: ObservableObject {
 
     func runSearch() {
         guard let idx = searchIndex else { searchHits = []; searchTotal = 0; return }
-        let results = idx.searchResults(searchQuery, limit: 200)
+        let results = idx.searchResults(searchQuery, limit: settings.searchResultLimit)
         searchHits = results.hits
         searchTotal = results.total
     }
@@ -504,21 +515,149 @@ final class AppModel: ObservableObject {
         bookmarks = bookmarkStore?.bookmarks ?? []
     }
 
-    // MARK: 显示设置 / 缩放 / 阅读状态保存
+    // MARK: 设置 / 缩放 / 阅读状态保存
 
-    func updateSettings(font: String? = nil, size: Double? = nil) {
-        var s = settings
-        if let font { s.fontFamily = font }
-        if let size { s.fontSize = size }
-        settings = s
-        settingsStore.update(s)
-        for tab in tabs { tab.applyFont(s) }
+    /// 设置文件路径(与 GUI 读写同一文件,供「打开配置文件」使用)。
+    var settingsFileURL: URL { ChimeraStateDir.root.appendingPathComponent("Settings.json") }
+
+    /// 应用并持久化设置;数值字段做钳制,语言变更写入 AppleLanguages(重启生效)。
+    func updateSettings(_ s: ChimeraSettings) {
+        let old = settings
+        var v = s
+        v.fontSize = min(72, max(9, v.fontSize))
+        // 步进类浮点值保留两位小数,避免配置文件出现 1.1000000000000001
+        v.lineHeight = (min(3.0, max(1.0, v.lineHeight)) * 100).rounded() / 100
+        v.contentMaxWidth = max(0, v.contentMaxWidth)
+        v.defaultZoom = (min(3.0, max(0.5, v.defaultZoom)) * 100).rounded() / 100
+        v.searchResultLimit = max(1, v.searchResultLimit)
+        v.recentLimit = max(1, v.recentLimit)
+        if !["system", "light", "dark"].contains(v.appearance) { v.appearance = "system" }
+        if !["system", "zh-Hans", "en"].contains(v.language) { v.language = "system" }
+        settings = v
+        settingsStore.update(v)
+        for tab in tabs {
+            tab.applyStyle(v)
+            tab.webView.magnification = v.defaultZoom
+        }
+        if v.language != old.language, ChimeraStateDir.overrideRoot == nil {
+            // 冒烟/隔离模式不写真实用户默认
+            switch v.language {
+            case "zh-Hans": UserDefaults.standard.set(["zh-Hans"], forKey: "AppleLanguages")
+            case "en": UserDefaults.standard.set(["en"], forKey: "AppleLanguages")
+            default: UserDefaults.standard.removeObject(forKey: "AppleLanguages")
+            }
+        }
+        if v.appearance != old.appearance { Self.applyAppearance(v.appearance) }
     }
 
+    /// 界面外观:经 NSApp.appearance 全局驱动(system = nil 跟随系统)。
+    ///
+    /// 不用 SwiftUI preferredColorScheme:从显式值(.light/.dark)切回 nil 时,
+    /// 已被覆盖的视图层级不会可靠复位(窗口工具栏变深、侧栏/内容残留浅色,
+    /// 即"只变一半")。NSApp.appearance 是 AppKit 层全局覆盖,nil 即恢复系统跟随,
+    /// 且系统外观切换时自动联动。
+    static func applyAppearance(_ appearance: String) {
+        switch appearance {
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
+        default: NSApp.appearance = nil
+        }
+    }
+
+    /// 重新从磁盘读取设置(拾取外部对配置文件的手改),并应用到已打开页面。
+    func reloadSettings() {
+        settingsStore.reload()
+        settings = settingsStore.settings
+        Self.applyAppearance(settings.appearance)
+        for tab in tabs { tab.applyStyle(settings) }
+    }
+
+    /// 页内滚动上报(节流来自 JS):记内存 + 防抖 1s 落盘(见 PERF_REVIEW P2-14)。
+    private var scrollFlushTask: Task<Void, Never>?
+
+    func tabDidScroll(_ tab: ReaderTab, path: String, y: Double) {
+        guard settings.restoreScrollPosition else { return }
+        readingStateStore.setScrollY(y, forBookKey: tab.document.url.path, path: path)
+        scrollFlushTask?.cancel()
+        scrollFlushTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.readingStateStore.flush()
+        }
+    }
+
+    func scrollY(path: String, bookURL: URL) -> Double? {
+        readingStateStore.scrollY(forBookKey: bookURL.path, path: path)
+    }
+
+    /// 退出前把未落盘的滚动位置写盘(AppDelegate 钩子)。
+    func flushScrollPositions() {
+        scrollFlushTask?.cancel()
+        readingStateStore.flush()
+    }
+
+    // MARK: 索引缓存管理
+
+    @Published var indexCacheSizeText = ""
+
+    /// 索引缓存目录:默认 ~/Library/Caches/Chimera;隔离模式在状态目录内。
+    var indexCacheDirectory: URL {
+        if ChimeraStateDir.overrideRoot != nil {
+            return ChimeraStateDir.root.appendingPathComponent("IndexCache", isDirectory: true)
+        }
+        return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Chimera", isDirectory: true)
+    }
+
+    func refreshIndexCacheSize() {
+        let dir = indexCacheDirectory
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            var total: Int64 = 0
+            if let e = FileManager.default.enumerator(
+                at: dir, includingPropertiesForKeys: [.fileSizeKey]) {
+                for case let u as URL in e {
+                    total += Int64(
+                        (try? u.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+                }
+            }
+            let text = ByteCountFormatter.string(fromByteCount: total, countStyle: .file)
+            DispatchQueue.main.async { self?.indexCacheSizeText = text }
+        }
+    }
+
+    /// 清空索引缓存(目录由 Core 在下次保存时重建;内存索引不受影响)。
+    func clearIndexCache() {
+        try? FileManager.default.removeItem(at: indexCacheDirectory)
+        refreshIndexCacheSize()
+    }
+
+    /// 用默认编辑器打开配置文件(不存在则先写入当前值)。
+    func openSettingsFile() {
+        if !FileManager.default.fileExists(atPath: settingsFileURL.path) {
+            settingsStore.update(settings)
+        }
+        NSWorkspace.shared.open(settingsFileURL)
+    }
+
+    /// 在 Finder 中显示配置文件。
+    func revealSettingsFile() {
+        if !FileManager.default.fileExists(atPath: settingsFileURL.path) {
+            settingsStore.update(settings)
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([settingsFileURL])
+    }
+
+    func clearRecents() {
+        readingStateStore.clearRecents()
+        recents = []
+    }
+
+    /// Cmd+=/-/0:缩放即「默认缩放」设置,全局持久化并对所有标签即时生效。
     func zoom(delta: Double = 0, reset: Bool = false) {
-        guard let tab = activeTab else { return }
-        let target = reset ? 1.0 : min(3.0, max(0.5, tab.webView.magnification + delta))
-        tab.webView.setMagnification(target, centeredAt: .zero)
+        var s = settings
+        s.defaultZoom = reset ? 1.0 : min(3.0, max(0.5, s.defaultZoom + delta))
+        guard s.defaultZoom != settings.defaultZoom else { return }
+        updateSettings(s)
     }
 
     func tabDidCommitPath(_ path: String, bookURL: URL) {

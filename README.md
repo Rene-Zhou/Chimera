@@ -11,7 +11,39 @@
 - 🗂 **多标签页**:每标签独立历史,Cmd+T/W,同书多开,目录右键"在新标签页打开"
 - 🔖 书签 · 前进/后退(Cmd+[ / ])· **重开恢复上次阅读位置** · 最近打开
 - 🔠 字体/字号自定义 · 缩放(Cmd+= / - / 0)
+- ⚙️ 设置窗口(Cmd+,):字体字号、恢复阅读位置、外链确认、搜索/最近打开上限等
 - ⚡️ 资源直接从容器按需 LZX 解压(零磁盘解压);全文索引磁盘缓存,二次打开即时搜索
+
+## 设置与配置文件 / Settings & Config File
+
+设置窗口(Cmd+,)与配置文件读写同一个 JSON:
+`~/Library/Application Support/Chimera/Settings.json`。
+
+- 可直接手改该文件进行更高阶的自定义;**GUI 保存时会保留文件中的未知字段**,两者可安全混用。
+- 缺失的键回退默认值;文件损坏时整文件回退默认值,不影响启动。
+- 应用运行中手改后,重新打开设置窗口即拾取(或在「设置 → 通用 → 配置文件」中一键打开/在 Finder 中显示该文件)。
+
+示例:
+
+```json
+{
+  "fontFamily" : "Songti SC",
+  "fontSize" : 18,
+  "lineHeight" : 1.6,
+  "contentMaxWidth" : 0,
+  "defaultZoom" : 1,
+  "restoreLastPosition" : true,
+  "restoreScrollPosition" : true,
+  "restoreLastBook" : false,
+  "tocDefaultExpanded" : false,
+  "confirmExternalLinks" : false,
+  "appearance" : "system",
+  "contentDarkMode" : false,
+  "language" : "system",
+  "searchResultLimit" : 200,
+  "recentLimit" : 10
+}
+```
 
 ## 安装 / Install
 

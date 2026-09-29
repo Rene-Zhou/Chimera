@@ -66,7 +66,6 @@ struct ReaderView: View {
                 }
             }
         }
-        .sheet(isPresented: $model.settingsVisible) { SettingsPanel(model: model) }
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             guard let p = providers.first(where: {
                 $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
@@ -80,48 +79,6 @@ struct ReaderView: View {
             }
             return true
         }
-    }
-}
-
-/// 显示设置面板:字体/字号,即时生效并持久化。
-struct SettingsPanel: View {
-    @ObservedObject var model: AppModel
-
-    private let fonts: [(String, String?)] = [
-        ("默认(系统)", nil),
-        ("苹方 PingFang SC", "PingFang SC"),
-        ("宋体 Songti SC", "Songti SC"),
-        ("楷体 Kaiti SC", "Kaiti SC"),
-        ("仿宋 STFangsong", "STFangsong"),
-        ("黑体 STHeiti", "STHeiti"),
-    ]
-
-    var body: some View {
-        VStack(spacing: 16) {
-            Text("显示设置").font(.title3)
-            Picker("字体", selection: Binding<String?>(
-                get: { model.settings.fontFamily },
-                set: { model.updateSettings(font: $0) }
-            )) {
-                ForEach(fonts, id: \.0) { name, value in
-                    // 经 LocalizedStringKey 显式查表:"默认(系统)"有翻译,字体名无对应键则原样显示
-                    Text(LocalizedStringKey(name)).tag(value)
-                }
-            }
-            .pickerStyle(.radioGroup)
-            HStack {
-                Text("字号 \(Int(model.settings.fontSize)) px")
-                    .monospacedDigit()
-                Slider(value: Binding<Double>(
-                    get: { model.settings.fontSize },
-                    set: { model.updateSettings(size: $0) }
-                ), in: 12...24, step: 1)
-            }
-            Button("完成") { model.settingsVisible = false }
-                .keyboardShortcut(.defaultAction)
-        }
-        .padding(24)
-        .frame(width: 340)
     }
 }
 

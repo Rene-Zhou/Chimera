@@ -14,8 +14,8 @@
 | F7 | 多标签页 | 独立历史,同书多开 | 冒烟:`TABS independent=true tabs=2`;Cmd+T/W |
 | F8 | 历史导航 | 前进/后退 | 冒烟:`HISTORY homeOK=true`;CHMHistory 单测 2 例 |
 | F9 | 书签 | 增删/跳转/重启仍在 | CHMBookmarkStore 持久化单测(reload 断言);工具栏星标 + 侧栏管理 |
-| F10 | 显示自定义 | 字体/字号/缩放持久化 | CHMSettingsStore 单测;**修复**:字号注入从 `*{...!important}` 改为 body 级,标题层级不再被压平;Cmd+=/-/0 |
-| F11 | 状态记忆 | 重开恢复位置/最近打开 | 冒烟:`RESTORE ok=true`;recents 去重置顶单测;窗口尺寸/侧栏宽度由 SwiftUI 自动持久化 |
+| F10 | 显示自定义 | 字体/字号/行高/内容宽度/缩放持久化;外观三态+内容暗色 | CHMSettingsStore 单测;**修复**:字号注入从 `*{...!important}` 改为 body 级,标题层级不再被压平;Cmd+=/-/0(缩放即全局默认缩放);设置窗口(Cmd+,)与 Settings.json 配置文件并存,合并写回保留未知键 |
+| F11 | 状态记忆 | 重开恢复位置/页内滚动位置/启动复书/最近打开 | 冒烟:`RESTORE ok=true`;recents 去重置顶单测;滚动位置 JS 节流上报 + 防抖落盘(退出前 flush);窗口尺寸/侧栏宽度由 SwiftUI 自动持久化 |
 | F12 | 系统集成 | 双击 .chm 打开/拖放 | 单窗口架构(实测连续 `open -a` 窗口数恒为 1);Info.plist 声明 .chm Owner;**修复**:LaunchServices 幽灵注册(调试包残留劫持 .chm 扩展名映射)导致 app 不出现在"打开方式"——已清理,实测 `urlsForApplications(toOpen:)` 返回 Chimera 且为默认;窗口 onDrop;DMG 挂载冒烟 |
 
 ## 第三轮复审记录(2026-09-26,基准书更换为 DND.26.09.13.chm)

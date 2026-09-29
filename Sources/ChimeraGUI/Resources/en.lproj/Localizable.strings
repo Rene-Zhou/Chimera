@@ -7,19 +7,50 @@
 "放大" = "Zoom In";
 "缩小" = "Zoom Out";
 "实际大小" = "Actual Size";
-"显示设置…" = "Settings…";
 "最近打开" = "Recent";
 "页内查找…" = "Find on Page…";
 
 /* Empty state */
 "打开一本 CHM 开始阅读" = "Open a CHM Book to Start Reading";
 
-/* Display settings panel */
-"显示设置" = "Display Settings";
-"默认(系统)" = "Default (System)";
+/* Settings window */
+"设置" = "Settings";
+"显示" = "Display";
+"阅读" = "Reading";
+"通用" = "General";
 "字体" = "Font";
+"默认(系统)" = "Default (System)";
 "字号 %lld px" = "Font Size %lld px";
-"完成" = "Done";
+"行高 %.1f" = "Line Height %.1f";
+"限制内容宽度" = "Limit Content Width";
+"默认缩放" = "Default Zoom";
+"重新打开时恢复上次阅读位置" = "Restore Last Reading Position";
+"记住页内滚动位置" = "Remember Scroll Position";
+"启动时打开上次读的书" = "Open Last Book at Launch";
+"首次打开时目录全部展开" = "Expand All TOC on First Open";
+"打开外部链接前询问" = "Ask Before Opening External Links";
+"外观" = "Appearance";
+"跟随系统" = "System";
+"浅色" = "Light";
+"深色" = "Dark";
+"网页内容强制暗色(实验)" = "Force Dark Page Content (Experimental)";
+"搜索结果上限" = "Search Result Limit";
+"索引缓存" = "Index Cache";
+"已占用 %@" = "%@ Used";
+"清理缓存" = "Clear Cache";
+"清理后下次打开书时会重建索引(首次搜索稍慢)。" = "The index will be rebuilt on next open (first search may be slower).";
+"界面语言" = "Language";
+"简体中文" = "简体中文";
+"语言切换将在重启应用后完全生效" = "Language changes take full effect after relaunch";
+"最近打开上限" = "Recent Items Limit";
+"清空最近打开" = "Clear Recent Items";
+"配置文件" = "Configuration File";
+"打开配置文件…" = "Open Configuration File…";
+"在 Finder 中显示" = "Reveal in Finder";
+"可手改该文件进行更高阶的自定义;GUI 保存时会保留其中的未知字段。" = "Edit this file for advanced customization; unknown fields are preserved when the GUI saves.";
+"打开外部链接?" = "Open External Link?";
+"打开" = "Open";
+"取消" = "Cancel";
 
 /* Find bar */
 "页内查找" = "Find on Page";

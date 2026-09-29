@@ -15,7 +15,7 @@ struct ChimeraApp: App {
             print("L10N localizations=\(Bundle.main.localizations)")
             print("L10N preferredLanguages=\(Locale.preferredLanguages)")
             print("L10N open=\(String(localized: "打开…"))")
-            print("L10N settings=\(String(localized: "显示设置…"))")
+            print("L10N settings=\(String(localized: "设置"))")
             print("L10N toc=\(String(localized: "目录"))")
             print("L10N empty=\(String(localized: "打开一本 CHM 开始阅读"))")
             print("L10N fontsize=\(String(localized: "字号 %lld px"))")
@@ -48,7 +48,6 @@ struct ChimeraApp: App {
                 Button("实际大小") { model.zoom(reset: true) }
                     .keyboardShortcut("0", modifiers: .command)
                 Divider()
-                Button("显示设置…") { model.settingsVisible = true }
                 if !model.recents.isEmpty {
                     Menu("最近打开") {
                         ForEach(model.recents, id: \.self) { p in
@@ -63,6 +62,11 @@ struct ChimeraApp: App {
                 Button("页内查找…") { model.findVisible = true }
                     .keyboardShortcut("f", modifiers: .command)
             }
+        }
+
+        // 标准设置场景:自动获得 Cmd+, 与「Chimera → 设置…」菜单项
+        Settings {
+            SettingsView(model: model)
         }
     }
 }
@@ -80,4 +84,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// 单窗口阅读器:关窗即退出(避免窗口关闭后没有重建入口的半死状态)。
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    /// 退出前落盘未保存的滚动位置(Cmd+Q 直接退出时防抖任务可能尚未触发)。
+    func applicationWillTerminate(_ notification: Notification) {
+        AppModel.shared?.flushScrollPositions()
+    }
 }

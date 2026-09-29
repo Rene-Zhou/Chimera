@@ -6,7 +6,8 @@ import ChimeraCore
 
 // MARK: - 标签(每标签独立 webview/历史/导航)
 
-final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDelegate {
+final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDelegate,
+                       WKScriptMessageHandler {
     let id = UUID()
     let document: AppModel.Document
     let webView: WKWebView
@@ -29,15 +30,30 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
         let container = document.container
         let config = WKWebViewConfiguration()
         config.setURLSchemeHandler(CHMSchemeHandler(provider: { container }), forURLScheme: "chm")
+        // 滚动位置上报脚本(页内滚动记忆):节流 scroll + pagehide 兜底;
+        // handler 需持有 self,在 super.init() 之后安装(见下)
+        config.userContentController.addUserScript(
+            WKUserScript(source: Self.scrollReportJS,
+                         injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        // 阅读样式在文档开始解析时注入(首帧绘制前 <style> 就位),
+        // 避免 didFinish 才注入导致的原字体闪帧(FOUC);
+        // 运行期设置变更仍由 applyStyle 热更新同一元素
+        config.userContentController.addUserScript(
+            WKUserScript(source: Self.earlyStyleJS(model.settings),
+                         injectionTime: .atDocumentStart, forMainFrameOnly: true))
         // 离线防线:屏蔽一切 http(s) 子资源(远程图片/脚本/字体等)。
         // 主框架导航由 decidePolicyFor 处理,这里只管子资源,与 PRD"无外部网络请求"对齐。
         // 异步安装,不阻塞标签创建(规则按 identifier 持久化,二次启动走缓存);
         // 首次安装完成前初次加载会被积压到规则就绪(见 load),后续标签直接放行
         Self.installOfflineRules(into: config.userContentController)
         webView = WKWebView(frame: .zero, configuration: config)
+        webView.magnification = model.settings.defaultZoom
 
         super.init()
         webView.navigationDelegate = self
+        // WKUserContentController 强引用 handler:经弱引用代理安装,避免与标签循环引用
+        webView.configuration.userContentController.add(
+            WeakScriptMessageProxy(self), name: "chimeraScroll")
 
         // 本标签导航请求
         $navigationRequest
@@ -188,7 +204,18 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
         case "http", "https":
             // 仅用户真实点击链接才转外部浏览器;iframe/重定向等静默取消
             if navigationAction.navigationType == .linkActivated {
-                NSWorkspace.shared.open(url)
+                if model?.settings.confirmExternalLinks == true {
+                    let alert = NSAlert()
+                    alert.messageText = String(localized: "打开外部链接?")
+                    alert.informativeText = url.absoluteString
+                    alert.addButton(withTitle: String(localized: "打开"))
+                    alert.addButton(withTitle: String(localized: "取消"))
+                    if alert.runModal() == .alertFirstButtonReturn {
+                        NSWorkspace.shared.open(url)
+                    }
+                } else {
+                    NSWorkspace.shared.open(url)
+                }
             }
             decisionHandler(.cancel)
         default:
@@ -224,13 +251,22 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         let smoke = ProcessInfo.processInfo.environment["CHIMERA_SMOKE"] == "1"
         updatePageTitle()   // didCommit 时 <title> 尚未解析,此处再刷一次
+        // 搜索跳转锚定优先:有命中高亮任务时不恢复旧滚动位置(避免盖掉 scrollIntoView)
+        let hadHighlight = pendingHighlight != nil
         if let q = pendingHighlight {
             pendingHighlight = nil
             webView.evaluateJavaScript(Self.highlightJS(q)) { result, _ in
                 if smoke { print("HIGHLIGHT count=\((result as? Int) ?? 0)") }
             }
         }
-        if let m = model { applyFont(m.settings) }
+        if let m = model {
+            applyStyle(m.settings)
+            // 页内滚动位置记忆(可在设置中关闭)
+            if !hadHighlight, m.settings.restoreScrollPosition, let path = currentPath,
+               let y = m.scrollY(path: path, bookURL: document.url), y > 0 {
+                webView.evaluateJavaScript("window.scrollTo(0,\(y))", completionHandler: nil)
+            }
+        }
         if smoke {
             // 强断言:contentType 必须是 text/html 且正文非空——把源码当文本显示时此处返回 -1
             webView.evaluateJavaScript(
@@ -252,8 +288,8 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
 
     // MARK: 注入 JS
 
-    func applyFont(_ s: CHMDisplaySettings) {
-        webView.evaluateJavaScript(Self.fontJS(s), completionHandler: nil)
+    func applyStyle(_ s: ChimeraSettings) {
+        webView.evaluateJavaScript(Self.styleJS(s), completionHandler: nil)
     }
 
     /// 任意字符串 → 合法 JS 字符串字面量(JSON 编码结果是 JS 字面量的子集,
@@ -266,16 +302,71 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
         return "\"\""
     }
 
-    /// 用户字体注入(每次页面加载与设置变更时应用)。
-    /// font-family 全局覆盖;font-size 只作用于 body,保留 h1/h2 等标题的相对层级。
-    static func fontJS(_ s: CHMDisplaySettings) -> String {
+    /// 阅读样式 CSS(font-family 全局覆盖;font-size/line-height/版心宽度只作用于
+    /// body,保留 h1/h2 等标题的相对层级;内容暗色为实验性 filter 反色,图片二次反色还原)。
+    static func styleCSS(_ s: ChimeraSettings) -> String {
         let fam = s.fontFamily.map { jsStringLiteral($0) + "," } ?? ""
-        return """
-        (function(){var e=document.getElementById('chimera-font-style');
-        if(!e){e=document.createElement('style');e.id='chimera-font-style';document.head.appendChild(e);}
-        e.textContent='*{font-family:\(fam)-apple-system,system-ui,sans-serif !important;}body{font-size:\(Int(s.fontSize))px !important;}';
+        var css = "*{font-family:\(fam)-apple-system,system-ui,sans-serif !important;}"
+        css += "body{font-size:\(Int(s.fontSize))px !important;"
+        css += "line-height:\(s.lineHeight) !important;"
+        if s.contentMaxWidth > 0 {
+            css += "max-width:\(Int(s.contentMaxWidth))px !important;"
+            css += "margin-left:auto !important;margin-right:auto !important;"
+        }
+        css += "}"
+        if s.contentDarkMode {
+            css += "html{filter:invert(1) hue-rotate(180deg) !important;background:#fff !important;}"
+            css += "img,video{filter:invert(1) hue-rotate(180deg) !important;}"
+        }
+        return css
+    }
+
+    /// 首帧前注入(atDocumentStart 用户脚本):head 可能尚未解析,挂到 documentElement。
+    static func earlyStyleJS(_ s: ChimeraSettings) -> String {
+        """
+        (function(){var e=document.createElement('style');e.id='chimera-style';
+        e.textContent=\(jsStringLiteral(styleCSS(s)));
+        (document.head||document.documentElement).appendChild(e);})()
+        """
+    }
+
+    /// 阅读样式热更新(设置变更/didFinish 兜底):找到首帧注入的元素替换内容,
+    /// 不存在(极端时序)则补建。
+    static func styleJS(_ s: ChimeraSettings) -> String {
+        """
+        (function(){var e=document.getElementById('chimera-style');
+        if(!e){e=document.createElement('style');e.id='chimera-style';
+        (document.head||document.documentElement).appendChild(e);}
+        e.textContent=\(jsStringLiteral(styleCSS(s)));
         return 1;})()
         """
+    }
+
+    /// 滚动位置上报:scroll 节流 400ms,pagehide 兜底(退出前最后一次)。
+    static let scrollReportJS = """
+    (function(){
+      if(window.__chimeraScrollInstalled) return;
+      window.__chimeraScrollInstalled = true;
+      var t = null;
+      function report(){
+        try{ window.webkit.messageHandlers.chimeraScroll.postMessage(window.scrollY); }catch(e){}
+      }
+      window.addEventListener('scroll', function(){
+        if(t) return;
+        t = setTimeout(function(){ t = null; report(); }, 400);
+      }, {passive:true});
+      window.addEventListener('pagehide', report);
+    })()
+    """
+
+    // MARK: WKScriptMessageHandler(滚动位置上报)
+
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        guard message.name == "chimeraScroll",
+              let y = (message.body as? NSNumber)?.doubleValue,
+              let path = currentPath else { return }
+        model?.tabDidScroll(self, path: path, y: y)
     }
 
     /// 命中词高亮:文本节点包裹 <mark> 并滚动到首个命中。
@@ -356,5 +447,17 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
           return (window.__chimeraIdx+1)+'/'+marks.length;
         })()
         """
+    }
+}
+
+/// WKUserContentController 会强引用 script message handler;经弱引用代理转发,
+/// 避免 webView → UCC → handler → ReaderTab 的循环引用。
+private final class WeakScriptMessageProxy: NSObject, WKScriptMessageHandler {
+    weak var target: WKScriptMessageHandler?
+    init(_ target: WKScriptMessageHandler) { self.target = target }
+
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        target?.userContentController(userContentController, didReceive: message)
     }
 }
