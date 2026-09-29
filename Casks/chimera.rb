@@ -4,7 +4,7 @@ cask "chimera" do
 
   # 本地工件验证(发布时替换为 GitHub Release URL,如
   # https://github.com/<user>/chimera/releases/download/v#{version}/Chimera.dmg)
-  url "file:///Users/rene/Dev/YAMCR/dist/Chimera.dmg"
+  url "file:///Users/rene/Dev/Chimera/dist/Chimera.dmg"
   name "Chimera"
   desc "Modern native CHM reader for macOS"
   homepage "https://github.com/rene/chimera"
