@@ -43,6 +43,21 @@ import Foundation
     #expect(h.backStack == ["/a.htm"])
 }
 
+@Test func historyPeekHelpers() {
+    var h = CHMHistory()
+    #expect(h.backPeek == nil && h.forwardPeek == nil, "空栈 peek 均为 nil")
+
+    h.push("/a.htm")
+    h.push("/b.htm")
+    h.push("/c.htm")
+    #expect(h.backPeek == "/b.htm", "backPeek 是当前页的后退目标")
+    #expect(h.forwardPeek == nil)
+
+    _ = h.goBack()
+    #expect(h.backPeek == "/a.htm")
+    #expect(h.forwardPeek == "/c.htm", "forwardPeek 是前进目标")
+}
+
 // MARK: - 书签存储
 
 @Test func bookmarkStorePersistsAcrossReload() throws {

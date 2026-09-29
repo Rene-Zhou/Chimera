@@ -12,6 +12,11 @@ public struct CHMHistory: Equatable {
     public var canGoBack: Bool { !backStack.isEmpty }
     public var canGoForward: Bool { !forwardStack.isEmpty }
 
+    /// 后退目标(栈顶的下一个);空栈返回 nil。
+    public var backPeek: String? { backStack.last }
+    /// 前进目标;空栈返回 nil。
+    public var forwardPeek: String? { forwardStack.first }
+
     /// 新页入栈:与当前相同则忽略;新分支清空 forward。
     public mutating func push(_ path: String) {
         guard path != current else { return }

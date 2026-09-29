@@ -168,8 +168,8 @@ final class AppModel: ObservableObject {
     let settingsStore: CHMSettingsStore
     let readingStateStore: CHMReadingStateStore
 
-    var canGoBack: Bool { activeTab?.history.canGoBack ?? false }
-    var canGoForward: Bool { activeTab?.history.canGoForward ?? false }
+    var canGoBack: Bool { activeTab?.canGoBack ?? false }
+    var canGoForward: Bool { activeTab?.canGoForward ?? false }
     var isCurrentPageBookmarked: Bool {
         guard let p = activeTab?.currentPath else { return false }
         return bookmarkStore?.bookmarks.contains { $0.path == p } ?? false

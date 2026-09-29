@@ -146,7 +146,7 @@ private struct GoBackButton: View {
     var body: some View {
         ObservedTabButton(model: model) { tab in
             Button { tab.goBack() } label: { Image(systemName: "chevron.backward") }
-                .disabled(!tab.history.canGoBack)
+                .disabled(!tab.canGoBack)
                 .keyboardShortcut("[", modifiers: .command)
         }
     }
@@ -157,7 +157,7 @@ private struct GoForwardButton: View {
     var body: some View {
         ObservedTabButton(model: model) { tab in
             Button { tab.goForward() } label: { Image(systemName: "chevron.forward") }
-                .disabled(!tab.history.canGoForward)
+                .disabled(!tab.canGoForward)
                 .keyboardShortcut("]", modifiers: .command)
         }
     }
