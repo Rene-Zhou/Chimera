@@ -197,6 +197,14 @@ private struct TabObserver<Content: View>: View {
 /// 页内查找覆盖条(Cmd+F 唤起)。
 struct FindBar: View {
     @ObservedObject var model: AppModel
+    @FocusState private var fieldFocused: Bool
+    // CLT 环境无 SwiftUIMacros 插件(@State 宏不可用),
+    // 本地状态改由 ObservableObject 持有(同 SidebarView,见 DEV_ENV.md)
+    @StateObject private var state = FindBarState()
+
+    final class FindBarState: ObservableObject {
+        var escMonitor: Any?
+    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -204,6 +212,7 @@ struct FindBar: View {
             TextField("页内查找", text: $model.findQuery)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 200)
+                .focused($fieldFocused)
                 .onSubmit { model.triggerFind(next: true) }
             Button { model.triggerFind(next: false) } label: { Image(systemName: "chevron.up") }
                 .buttonStyle(.borderless)
@@ -211,7 +220,7 @@ struct FindBar: View {
                 .buttonStyle(.borderless)
             Text(model.findStatus).font(.caption).foregroundStyle(.secondary).frame(width: 44)
             Spacer()
-            Button { model.findVisible = false; model.findStatus = "" } label: {
+            Button { model.closeFindBar() } label: {
                 Image(systemName: "xmark.circle.fill")
             }
             .buttonStyle(.borderless).foregroundStyle(.secondary)
@@ -219,6 +228,36 @@ struct FindBar: View {
         .padding(8)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
         .padding(8)
+        .onAppear {
+            // 出现即聚焦输入框;async 避免视图尚未完全挂载时设置失效
+            DispatchQueue.main.async { fieldFocused = true }
+            installEscMonitor()
+        }
+        .onDisappear { removeEscMonitor() }
+        .onChange(of: model.findFocusToken) { _, _ in
+            fieldFocused = true
+        }
+    }
+
+    // 查找条可见期间 Esc 关闭查找条。SwiftUI 的 TextField 会吞掉 Esc(用于取消编辑),
+    // onExitCommand 不触发,故用本地按键监听统一拦截;
+    // 中文输入法组合期间(markedText)把 Esc 留给取消候选。
+    private func installEscMonitor() {
+        guard state.escMonitor == nil else { return }
+        state.escMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard event.keyCode == 53 else { return event }   // 53 = Esc
+            if let inputClient = event.window?.firstResponder as? NSTextInputClient,
+               inputClient.hasMarkedText() {
+                return event
+            }
+            model.closeFindBar()
+            return nil
+        }
+    }
+
+    private func removeEscMonitor() {
+        if let monitor = state.escMonitor { NSEvent.removeMonitor(monitor) }
+        state.escMonitor = nil
     }
 }
 

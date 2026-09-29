@@ -20,6 +20,8 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
     @Published var pageTitle = ""
     /// 搜索跳转后待高亮的检索词
     var pendingHighlight: String?
+    /// 双指横划导航冷却:上次触发时刻(见 handleNavGesture)
+    private var lastNavGestureAt = Date.distantPast
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -34,6 +36,11 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
         // handler 需持有 self,在 super.init() 之后安装(见下)
         config.userContentController.addUserScript(
             WKUserScript(source: Self.scrollReportJS,
+                         injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        // 触摸板双指横划导航(对齐 Safari):页面横向滚动到底后继续划才触发后退/前进;
+        // 纯 passive 监听,不拦截页面正常滚动(见 navGestureJS)
+        config.userContentController.addUserScript(
+            WKUserScript(source: Self.navGestureJS,
                          injectionTime: .atDocumentEnd, forMainFrameOnly: true))
         // 阅读样式在文档开始解析时注入(首帧绘制前 <style> 就位),
         // 避免 didFinish 才注入导致的原字体闪帧(FOUC);
@@ -54,6 +61,8 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
         // WKUserContentController 强引用 handler:经弱引用代理安装,避免与标签循环引用
         webView.configuration.userContentController.add(
             WeakScriptMessageProxy(self), name: "chimeraScroll")
+        webView.configuration.userContentController.add(
+            WeakScriptMessageProxy(self), name: "chimeraNav")
 
         // 本标签导航请求
         $navigationRequest
@@ -359,15 +368,81 @@ final class ReaderTab: NSObject, ObservableObject, Identifiable, WKNavigationDel
     })()
     """
 
-    // MARK: WKScriptMessageHandler(滚动位置上报)
+    // MARK: WKScriptMessageHandler(滚动位置上报 / 横划导航)
 
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
-        guard message.name == "chimeraScroll",
-              let y = (message.body as? NSNumber)?.doubleValue,
-              let path = currentPath else { return }
-        model?.tabDidScroll(self, path: path, y: y)
+        switch message.name {
+        case "chimeraScroll":
+            guard let y = (message.body as? NSNumber)?.doubleValue,
+                  let path = currentPath else { return }
+            model?.tabDidScroll(self, path: path, y: y)
+        case "chimeraNav":
+            guard let dir = message.body as? String else { return }
+            handleNavGesture(dir)
+        default:
+            break
+        }
     }
+
+    /// 双指横划触发的导航。冷却 0.4s:硬甩后的动量滚动会延续到新页面,
+    /// 新页脚本状态归零,可能立刻再次过阈值 —— 在原生侧挡住连环触发;
+    /// 刻意的连续快划(抬指再划)间隔必然 > 0.4s,不受影响。
+    private func handleNavGesture(_ dir: String) {
+        let now = Date()
+        guard now.timeIntervalSince(lastNavGestureAt) > 0.4 else { return }
+        lastNavGestureAt = now
+        if dir == "back" { goBack() } else { goForward() }
+    }
+
+    /// 触摸板双指横划导航(对齐 Safari):
+    /// - 横划主导(|dx|>|dy|)才计入;划动方向反转重新累计;停顿 >200ms 重新累计
+    /// - 从事件目标向上遍历所有可横向滚动的元素(含 documentElement),
+    ///   全部已到对应边缘(无法继续朝划动方向滚)才累计 —— 宽页面(长表格/
+    ///   代码块)先横滚,滚到边后继续划才触发导航,不与页面横滚冲突
+    /// - 累计超过阈值(120px)后向原生发 back/forward,之后本次手势不再触发
+    /// - passive 监听,绝不 preventDefault,页面滚动行为零影响
+    static let navGestureJS = """
+    (function(){
+      if(window.__chimeraNavInstalled) return;
+      window.__chimeraNavInstalled = true;
+      var THRESHOLD = 120, IDLE_MS = 200;
+      var accum = 0, dir = 0, fired = false, last = 0;
+      function post(d){
+        try{ window.webkit.messageHandlers.chimeraNav.postMessage(d); }catch(e){}
+      }
+      // sign>0(右划→后退):要求链上每个可横滚元素都已在左边缘;
+      // sign<0(左划→前进):都已在右边缘
+      function atEdgeAll(target, sign){
+        var el = (target && target.nodeType === 1) ? target : document.documentElement;
+        for(; el; el = el.parentElement){
+          if(el.scrollWidth > el.clientWidth + 1){
+            var sl = el.scrollLeft, cw = el.clientWidth;
+            if(el === document.documentElement){ sl = window.scrollX || sl; cw = window.innerWidth; }
+            if(sign > 0){ if(sl > 0) return false; }
+            else if(sl + cw < el.scrollWidth - 1) return false;
+          }
+        }
+        return true;
+      }
+      window.addEventListener('wheel', function(e){
+        var now = Date.now();
+        if(now - last > IDLE_MS){ accum = 0; dir = 0; fired = false; }
+        last = now;
+        if(fired) return;
+        var dx = e.deltaX, dy = e.deltaY;
+        if(!dx || Math.abs(dx) <= Math.abs(dy)) return;   // 垂直主导,不算横划
+        var d = dx > 0 ? 1 : -1;
+        if(d !== dir){ dir = d; accum = 0; }              // 划动方向反转,重新累计
+        if(!atEdgeAll(e.target, d)){ accum = 0; return; } // 页面还能横滚,交给页面
+        accum += dx;
+        if(Math.abs(accum) >= THRESHOLD){
+          fired = true;
+          post(dir > 0 ? 'back' : 'forward');
+        }
+      }, {passive:true});
+    })()
+    """
 
     /// 命中词高亮:文本节点包裹 <mark> 并滚动到首个命中。
     /// 查询词小写化(ql)在循环外一次完成,对齐 findJS 的做法。

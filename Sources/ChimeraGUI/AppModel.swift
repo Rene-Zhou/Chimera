@@ -147,6 +147,8 @@ final class AppModel: ObservableObject {
     @Published var findQuery = ""
     @Published var findStatus = ""
     @Published var findAction: FindAction?
+    /// 每次 ⌘F 递增,驱动 FindBar 聚焦输入框(已打开时再次按下也能重新聚焦)
+    @Published private(set) var findFocusToken = 0
 
     // MARK: 书签(书级)
 
@@ -485,6 +487,21 @@ final class AppModel: ObservableObject {
                                             tocTitles: tocTitles)
         }
         return try CHMSearchIndex.build(container: container, tocTitles: tocTitles)
+    }
+
+    /// ⌘F:打开页内查找并聚焦输入框(已打开时重新聚焦)
+    func showFindBar() {
+        findVisible = true
+        findFocusToken += 1
+    }
+
+    /// 关闭页内查找(Esc / 关闭按钮),并把焦点交还给当前页的 WebView
+    func closeFindBar() {
+        findVisible = false
+        findStatus = ""
+        if let tab = activeTab, let window = tab.webView.window {
+            window.makeFirstResponder(tab.webView)
+        }
     }
 
     func startFind() {

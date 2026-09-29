@@ -59,7 +59,7 @@ struct ChimeraApp: App {
                 }
             }
             CommandGroup(after: .textEditing) {
-                Button("页内查找…") { model.findVisible = true }
+                Button("页内查找…") { model.showFindBar() }
                     .keyboardShortcut("f", modifiers: .command)
             }
         }
