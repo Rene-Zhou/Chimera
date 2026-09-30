@@ -1,0 +1,30 @@
+# TAP_TOKEN 健康检查(手动触发):验证 secret 能否读写 tap 仓库。
+# 换新 token 后跑一次:green = release.yml 的 tap 同步链路可用。
+# 用法:gh workflow run "Tap Token Check" --repo Rene-Zhou/Chimera
+name: Tap Token Check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 用 TAP_TOKEN 克隆并推送 tap(临时分支,即推即删)
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          if [ -z "${TAP_TOKEN:-}" ]; then
+            echo "::error::TAP_TOKEN 未配置"; exit 1
+          fi
+          TAP="Rene-Zhou/homebrew-tap"
+          TAP_GIT="https://x-access-token:${TAP_TOKEN}@github.com/$TAP"
+          rm -rf /tmp/tap
+          git clone -q "$TAP_GIT" /tmp/tap
+          cd /tmp/tap
+          git config user.name "token-check"
+          git config user.email "actions@users.noreply.github.com"
+          # 证明有 Contents:write——推临时分支再删掉,不留下任何痕迹
+          git push -q origin HEAD:refs/heads/token-check
+          git push -q origin --delete token-check
+          echo "OK: TAP_TOKEN 可克隆并推送 $TAP"
