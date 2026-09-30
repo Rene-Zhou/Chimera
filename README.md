@@ -1,69 +1,50 @@
-# Chimera 🐉📖
+# Chimera
 
-**现代原生 macOS CHM 阅读器 / A modern native CHM reader for macOS**
+<p align="center">
+  <img src="assets/icon/chimera-preview.png" width="128" alt="Chimera icon">
+</p>
 
-纯 Swift(SwiftUI + AppKit + WKWebView)。为阅读 TTRPG 规则书、技术文档等 CHM 资料而生。
+<p align="center">
+  <b>现代原生 macOS CHM 阅读器 · A modern native CHM reader for macOS</b>
+</p>
 
-## 功能 / Features
+<p align="center">
+  纯 Swift 编写(SwiftUI + AppKit + WKWebView),为阅读 TTRPG 规则书、技术文档等 CHM 资料而生。<br>
+</p>
 
-- 📂 打开渲染 `.chm`:GBK/Big5/UTF-8 多级解码回退,中文不乱码
-- 🌲 目录树 / 索引页签 / **全书搜索**(标题+摘要,跳转后命中高亮)/ 页内查找(Cmd+F)
-- 🗂 **多标签页**:每标签独立历史,Cmd+T/W,同书多开,目录右键"在新标签页打开"
-- 🔖 书签 · 前进/后退(Cmd+[ / ])· **重开恢复上次阅读位置** · 最近打开
-- 🔠 字体/字号自定义 · 缩放(Cmd+= / - / 0)
-- ⚙️ 设置窗口(Cmd+,):字体字号、恢复阅读位置、外链确认、搜索/最近打开上限等
-- ⚡️ 资源直接从容器按需 LZX 解压(零磁盘解压);全文索引磁盘缓存,二次打开即时搜索
+---
 
-## 设置与配置文件 / Settings & Config File
+## 功能亮点 / Features
 
-设置窗口(Cmd+,)与配置文件读写同一个 JSON:
-`~/Library/Application Support/Chimera/Settings.json`。
-
-- 可直接手改该文件进行更高阶的自定义;**GUI 保存时会保留文件中的未知字段**,两者可安全混用。
-- 缺失的键回退默认值;文件损坏时整文件回退默认值,不影响启动。
-- 应用运行中手改后,重新打开设置窗口即拾取(或在「设置 → 通用 → 配置文件」中一键打开/在 Finder 中显示该文件)。
-
-示例:
-
-```json
-{
-  "fontFamily" : "Songti SC",
-  "fontSize" : 18,
-  "lineHeight" : 1.6,
-  "contentMaxWidth" : 0,
-  "defaultZoom" : 1,
-  "restoreLastPosition" : true,
-  "restoreScrollPosition" : true,
-  "restoreLastBook" : false,
-  "tocDefaultExpanded" : false,
-  "confirmExternalLinks" : false,
-  "appearance" : "system",
-  "contentDarkMode" : false,
-  "language" : "system",
-  "searchResultLimit" : 200,
-  "recentLimit" : 10
-}
-```
+- **打开即读**:直接渲染 `.chm` 容器内资源,按需 LZX 解压,零磁盘解压、秒开大文件
+- **中文不乱码**:GBK / Big5 / UTF-8 多级解码回退,自动识别书内 LCID
+- **完整导航**:目录树、索引页签、全书搜索(标题 + 摘要,跳转后命中高亮)、页内查找(⌘F)
+- **多标签页**:每个标签独立浏览历史,⌘T / ⌘W,同书多开,目录右键「在新标签页打开」
+- **Safari 式前进/后退**:原生触控板双指滑动翻页,⌘[ / ⌘]
+- **阅读不间断**:书签、重开恢复上次阅读位置(含滚动位置)、最近打开列表
+- **排版自由**:字体、字号、行高、内容宽度自定义,⌘= / ⌘- / ⌘0 缩放,内容区独立深色模式
+- **极速搜索**:全文索引磁盘缓存,二次打开即时可搜
+- **中英双语界面**,跟随系统或手动切换
 
 ## 安装 / Install
 
-从 Releases 下载 `Chimera.dmg`,拖入"应用程序"。
+从 [Releases](../../releases) 下载 `Chimera.dmg`,拖入「应用程序」。
 
-> 未公证应用首次打开:右键 → 打开;或终端执行
-> `xattr -d com.apple.quarantine /Applications/Chimera.app`
+> 未公证应用首次打开:右键 → 打开;或在终端执行
+>
+> ```bash
+> xattr -d com.apple.quarantine /Applications/Chimera.app
+> ```
 
-Homebrew(正式发布后):`brew install --cask chimera`
-
-## 构建 / Build
-
-仅需 Command Line Tools,**无需完整 Xcode**:
+Homebrew(正式发布后):
 
 ```bash
-./scripts/test.sh      # 测试(swift-testing;需注入宏插件路径,见 docs/DEV_ENV.md)
-./scripts/make-app.sh  # 产物:dist/Chimera.app + Chimera.dmg(+ AppIcon.icns)
+brew install --cask chimera
 ```
+
+要求:macOS 14 Sonoma 或更高版本。
 
 ## 许可 / License
 
-- 本体:MIT(见 `LICENSE`)
-- 内置 chmlib 0.40a:LGPL-2.1,源码随仓分发(见 `docs/THIRD_PARTY_NOTICES.md`、`Sources/CChmlib/COPYING.LGPL`)
+- 本体:[MIT](LICENSE) © 2026 Rene Zhou
+- 内置 chmlib 0.40a:LGPL-2.1,源码随仓分发 — 详见 [`docs/THIRD_PARTY_NOTICES.md`](docs/THIRD_PARTY_NOTICES.md) 与 [`Sources/CChmlib/COPYING.LGPL`](Sources/CChmlib/COPYING.LGPL)
