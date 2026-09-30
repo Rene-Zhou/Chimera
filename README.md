@@ -38,10 +38,10 @@
 > xattr -d com.apple.quarantine /Applications/Chimera.app
 > ```
 
-Homebrew(正式发布后):
+Homebrew:
 
 ```bash
-brew install --cask chimera
+brew install --cask rene-zhou/tap/chimera
 ```
 
 要求:macOS 14 Sonoma 或更高版本。

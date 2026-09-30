@@ -53,3 +53,39 @@ jobs:
             dist/Chimera.dmg.sha256
           generate_release_notes: true
           fail_on_unmatched_files: true
+
+      # Homebrew:主仓库 Casks/chimera.rb 为正本,发版时改 version/sha256
+      # 并推送同一份到 tap 仓库 Rene-Zhou/homebrew-tap(跨仓库需 TAP_TOKEN secret;
+      # 未配置则只同步主仓库,Release 本身不受影响)
+      - name: 同步 Homebrew cask(主仓库 + tap)
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SHA="$(shasum -a 256 dist/Chimera.dmg | awk '{print $1}')"
+          echo "version=$VERSION sha256=$SHA"
+          # cask 的 url 行固定指向 releases/download,只需改 version/sha256
+          sed -i '' -e "s/^  version .*/  version \"$VERSION\"/" \
+                    -e "s/^  sha256 .*/  sha256 \"$SHA\"/" \
+                    Casks/chimera.rb
+          git config user.name "release-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add Casks/chimera.rb
+          git commit -m "chore(cask): v${VERSION}" || true
+          git push origin HEAD:main
+
+          if [ -z "${TAP_TOKEN:-}" ]; then
+            echo "::warning::未配置 TAP_TOKEN,跳过 tap 同步(仅更新主仓库 cask)"
+            exit 0
+          fi
+          TAP="Rene-Zhou/homebrew-tap"
+          TAP_GIT="https://x-access-token:${TAP_TOKEN}@github.com/$TAP"
+          git clone -q "$TAP_GIT" /tmp/tap
+          cp Casks/chimera.rb /tmp/tap/Casks/chimera.rb
+          cd /tmp/tap
+          git config user.name "release-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add Casks/chimera.rb
+          git commit -m "chimera v${VERSION}" || true
+          git push -q origin main
+          echo "tap 同步完成: https://github.com/$TAP"
