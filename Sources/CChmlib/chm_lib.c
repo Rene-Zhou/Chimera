@@ -568,6 +568,18 @@ static int _unmarshal_lzxc_reset_table(unsigned char **pData,
     if (dest->version != 2)
         return 0;
 
+    /* CVE-2025-48172: block_len drives fixed-size mallocs downstream and
+     * was previously truncated to unsigned int, so a crafted value >= 2^32
+     * would wrap "block_len + 6144" and undersize the compressed-block
+     * buffer, causing a heap overflow in _chm_fetch_bytes.  Real CHM files
+     * use 32768-byte (0x8000) LZX blocks, and the LZX window is at most 2Mb
+     * (LZXinit accepts 2^15..2^21), so anything outside (0, 2Mb] is
+     * malformed: reject it here so the file is treated as uncompressed-
+     * only and compressed reads fail gracefully instead of overflowing.
+     */
+    if (dest->block_len == 0  ||  dest->block_len > (UInt64)0x200000)
+        return 0;
+
     return 1;
 }
 
@@ -1383,7 +1395,7 @@ static Int64 _chm_decompress_block(struct chmFile *h,
                                    UInt64 block,
                                    UChar **ubuffer)
 {
-    UChar *cbuffer = malloc(((unsigned int)h->reset_table.block_len + 6144));
+    UChar *cbuffer = malloc((size_t)h->reset_table.block_len + 6144);
     UInt64 cmpStart;                                    /* compressed start  */
     Int64 cmpLen;                                       /* compressed len    */
     int indexSlot;                                      /* cache index slot  */
@@ -1420,7 +1432,7 @@ static Int64 _chm_decompress_block(struct chmFile *h,
 
                 indexSlot = (int)((curBlockIdx) % h->cache_num_blocks);
                 if (! h->cache_blocks[indexSlot])
-                    h->cache_blocks[indexSlot] = (UChar *)malloc((unsigned int)(h->reset_table.block_len));
+                    h->cache_blocks[indexSlot] = (UChar *)malloc((size_t)(h->reset_table.block_len));
                 if (! h->cache_blocks[indexSlot])
                 {
                     free(cbuffer);
@@ -1465,7 +1477,7 @@ static Int64 _chm_decompress_block(struct chmFile *h,
     /* allocate slot in cache */
     indexSlot = (int)(block % h->cache_num_blocks);
     if (! h->cache_blocks[indexSlot])
-        h->cache_blocks[indexSlot] = (UChar *)malloc(((unsigned int)h->reset_table.block_len));
+        h->cache_blocks[indexSlot] = (UChar *)malloc((size_t)h->reset_table.block_len);
     if (! h->cache_blocks[indexSlot])
     {
         free(cbuffer);
