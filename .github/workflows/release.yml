@@ -1,0 +1,55 @@
+# Release — 推 v* tag 自动:注入版本号 → 测试 → 打包 DMG → 发布 GitHub Release
+# 产物:Chimera.dmg + Chimera.dmg.sha256(自动生成变更日志)
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Test, Package & Publish
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+
+      # tag(v1.2.3)→ CFBundleShortVersionString(1.2.3);
+      # CFBundleVersion 用 run number 保证单调递增
+      - name: 从 tag 注入版本号
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PLIST=scripts/AppResources/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "$PLIST"
+          echo "Chimera $VERSION (build ${{ github.run_number }})"
+
+      - name: Build (debug) & Test
+        run: |
+          swift build
+          ./scripts/test.sh
+
+      - name: Install cairo
+        run: brew install cairo
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: 组装 .app + DMG
+        run: ./scripts/make-app.sh
+
+      - name: 生成 SHA256
+        run: |
+          cd dist
+          shasum -a 256 Chimera.dmg > Chimera.dmg.sha256
+          cat Chimera.dmg.sha256
+
+      - name: 发布 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Chimera.dmg
+            dist/Chimera.dmg.sha256
+          generate_release_notes: true
+          fail_on_unmatched_files: true

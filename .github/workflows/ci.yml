@@ -1,0 +1,47 @@
+# CI — push/PR:构建 + swift-testing 测试 + 打包 DMG(工件不上传 Release)
+# smoke.sh 需要真实 CHM 书(不入库),GUI 冒烟仅在本地跑。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build & Test
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build (debug,全目标含 GUI/CLI)
+        run: swift build
+
+      - name: Test (swift-testing;脚本按 CLT/Xcode 自适应)
+        run: ./scripts/test.sh
+
+  package:
+    name: Package DMG
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+
+      # 图标管线依赖:cairosvg 底层 libcairo(make-app.sh 硬编码
+      # /opt/homebrew/lib/libcairo.2.dylib,与 arm64 runner 的 Homebrew 一致)
+      - name: Install cairo
+        run: brew install cairo
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: 组装 .app + DMG
+        run: ./scripts/make-app.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Chimera-dmg
+          path: dist/Chimera.dmg
+          if-no-files-found: error

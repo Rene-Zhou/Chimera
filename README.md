@@ -1,5 +1,7 @@
 # Chimera
 
+[![CI](https://github.com/Rene-Zhou/Chimera/actions/workflows/ci.yml/badge.svg)](https://github.com/Rene-Zhou/Chimera/actions/workflows/ci.yml)
+
 <p align="center">
   <img src="assets/icon/chimera-preview.png" width="128" alt="Chimera icon">
 </p>
